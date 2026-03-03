@@ -1,0 +1,572 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum MembershipRole {
+  OWNER
+  ADMIN
+  ACCOUNTANT
+  MEMBER
+  VIEWER
+}
+
+enum DocumentType {
+  DEVIS
+  FACTURE
+  FACTURE_PROFORMA
+  BON_LIVRAISON
+  BON_COMMANDE
+  EXTRACT_DEVIS
+  EXTRACT_BON_COMMANDE_PUBLIC
+}
+
+enum DocumentStatus {
+  DRAFT
+  ISSUED
+  SENT
+  APPROVED
+  REJECTED
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum RelationType {
+  CONVERTED
+  EXTRACTED_FROM
+  DERIVED
+}
+
+enum TemplateFormat {
+  DOCX
+  XLSX
+  HTML
+}
+
+enum ExportFormat {
+  PDF
+  DOCX
+  XLSX
+}
+
+enum ExportStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum ImportType {
+  CAHIER_CHARGES
+  BON_COMMANDE_PUBLIC
+}
+
+enum ImportStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum PaymentMethod {
+  BANK_TRANSFER
+  CASH
+  CARD
+  CHECK
+  OTHER
+}
+
+enum NotificationType {
+  DUE_SOON
+  OVERDUE
+  DRAFT_STALE
+  STATUS_CHANGED
+  EMAIL_FAILED
+  EXPORT_FAILED
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  PUSH
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  CANCELLED
+}
+
+model User {
+  id              String                @id @default(cuid())
+  email           String                @unique
+  passwordHash    String
+  fullName        String
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  memberships     CompanyMembership[]
+  createdDocs     Document[]            @relation("DocumentCreatedBy")
+  paymentsCreated Payment[]             @relation("PaymentCreatedBy")
+  eventsCreated   DocumentStatusEvent[] @relation("StatusEventCreatedBy")
+  notificationReads NotificationRead[]
+}
+
+model Company {
+  id                   String                @id @default(cuid())
+  name                 String
+  slug                 String                @unique
+  defaultCurrency      String                @default("MAD")
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  memberships          CompanyMembership[]
+  profile              CompanyProfile?
+  numberingRules       NumberingSequence[]
+  clients              Client[]
+  products             Product[]
+  documents            Document[]
+  templates            Template[]
+  exports              ExportJob[]
+  imports              ImportJob[]
+  paymentAllocations   PaymentAllocation[]
+  payments             Payment[]
+  notificationRules    NotificationRule[]
+  notificationEvents   NotificationEvent[]
+  settings             CompanySetting[]
+  documentPayloads     DocumentTypePayload[]
+  documentLineItems    DocumentLineItem[]
+  documentRelations    DocumentRelation[]
+  documentStatusEvents DocumentStatusEvent[]
+  documentAttachments  DocumentAttachment[]
+  templateVersions     TemplateVersion[]
+  importResults        ImportJobResult[]
+}
+
+model CompanyMembership {
+  id        String         @id @default(cuid())
+  companyId String
+  userId    String
+  role      MembershipRole @default(OWNER)
+  isActive  Boolean        @default(true)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  company   Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, userId])
+  @@index([userId, isActive])
+}
+
+model CompanyProfile {
+  id             String   @id @default(cuid())
+  companyId      String   @unique
+  legalName      String?
+  ice            String?
+  ifNumber       String?
+  rcNumber       String?
+  cnssNumber     String?
+  phoneFix       String?
+  phoneMobile    String?
+  email          String?
+  addressLine1   String?
+  addressLine2   String?
+  city           String?
+  country        String?
+  zipCode        String?
+  bankName       String?
+  iban           String?
+  swift          String?
+  taxRateDefault Decimal? @db.Decimal(5, 2)
+  website        String?
+  logoUrl        String?
+  signatureUrl   String?
+  extraJson      Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model NumberingSequence {
+  id           String       @id @default(cuid())
+  companyId    String
+  documentType DocumentType
+  prefix       String       @default("")
+  format       String       @default("{prefix}-{year}-{seq:5}")
+  nextValue    Int          @default(1)
+  resetYearly  Boolean      @default(true)
+  currentYear  Int?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  company      Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, documentType])
+}
+
+model Client {
+  id        String     @id @default(cuid())
+  companyId String
+  code      String?
+  name      String
+  email     String?
+  phone     String?
+  phoneFix  String?
+  address   String?
+  city      String?
+  country   String?
+  ice       String?
+  ifNumber  String?
+  notes     String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  company   Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  documents Document[]
+  payments  Payment[]
+
+  @@index([companyId, name])
+  @@index([companyId, email])
+}
+
+model Product {
+  id          String             @id @default(cuid())
+  companyId   String
+  sku         String?
+  name        String
+  description String?
+  unit        String             @default("u")
+  priceHT     Decimal            @db.Decimal(12, 2)
+  vatRate     Decimal            @default(20) @db.Decimal(5, 2)
+  isActive    Boolean            @default(true)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  company     Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  lineItems   DocumentLineItem[]
+
+  @@unique([companyId, sku])
+  @@index([companyId, name])
+}
+
+model Document {
+  id                 String                @id @default(cuid())
+  companyId          String
+  createdById        String
+  clientId           String?
+  documentType       DocumentType
+  documentNumber     String
+  status             DocumentStatus        @default(DRAFT)
+  title              String?
+  issueDate          DateTime?
+  dueDate            DateTime?
+  language           String                @default("fr")
+  currency           String                @default("MAD")
+  subtotalHT         Decimal               @default(0) @db.Decimal(14, 2)
+  totalTax           Decimal               @default(0) @db.Decimal(14, 2)
+  totalTTC           Decimal               @default(0) @db.Decimal(14, 2)
+  amountPaid         Decimal               @default(0) @db.Decimal(14, 2)
+  amountDue          Decimal               @default(0) @db.Decimal(14, 2)
+  notes              String?
+  terms              String?
+  metadataJson       Json?
+  convertedFromId    String?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  company            Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy          User                  @relation("DocumentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  client             Client?               @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  payload            DocumentTypePayload?
+  lineItems          DocumentLineItem[]
+  sourceRelations    DocumentRelation[]    @relation("SourceDocument")
+  targetRelations    DocumentRelation[]    @relation("TargetDocument")
+  statusEvents       DocumentStatusEvent[]
+  attachments        DocumentAttachment[]
+  exports            ExportJob[]
+  paymentAllocations PaymentAllocation[]
+  notificationEvents NotificationEvent[]
+
+  @@unique([companyId, documentType, documentNumber])
+  @@index([companyId, status, dueDate])
+  @@index([companyId, clientId, createdAt])
+}
+
+model DocumentTypePayload {
+  id          String   @id @default(cuid())
+  companyId   String
+  documentId  String   @unique
+  payloadJson Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+}
+
+model DocumentLineItem {
+  id             String   @id @default(cuid())
+  companyId      String
+  documentId     String
+  productId      String?
+  sortOrder      Int      @default(0)
+  label          String
+  description    String?
+  sku            String?
+  unit           String   @default("u")
+  quantity       Decimal  @db.Decimal(12, 3)
+  unitPriceHT    Decimal  @db.Decimal(12, 2)
+  discountRate   Decimal  @default(0) @db.Decimal(5, 2)
+  vatRate        Decimal  @db.Decimal(5, 2)
+  lineSubtotalHT Decimal  @db.Decimal(12, 2)
+  lineTotalTTC   Decimal  @db.Decimal(12, 2)
+  snapshotJson   Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  document       Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  product        Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, documentId, sortOrder])
+}
+
+model DocumentRelation {
+  id               String       @id @default(cuid())
+  companyId        String
+  sourceDocumentId String
+  targetDocumentId String
+  relationType     RelationType @default(CONVERTED)
+  mappingJson      Json?
+  createdAt        DateTime     @default(now())
+  company          Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  sourceDocument   Document     @relation("SourceDocument", fields: [sourceDocumentId], references: [id], onDelete: Cascade)
+  targetDocument   Document     @relation("TargetDocument", fields: [targetDocumentId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, sourceDocumentId])
+  @@index([companyId, targetDocumentId])
+}
+
+model DocumentStatusEvent {
+  id         String          @id @default(cuid())
+  companyId  String
+  documentId String
+  actorId    String?
+  fromStatus DocumentStatus?
+  toStatus   DocumentStatus
+  note       String?
+  createdAt  DateTime        @default(now())
+  company    Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  document   Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  actor      User?           @relation("StatusEventCreatedBy", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, documentId, createdAt])
+}
+
+model DocumentAttachment {
+  id         String   @id @default(cuid())
+  companyId  String
+  documentId String
+  fileName   String
+  mimeType   String
+  filePath   String
+  fileSize   Int?
+  createdAt  DateTime @default(now())
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, documentId])
+}
+
+model Template {
+  id             String            @id @default(cuid())
+  companyId      String
+  documentType   DocumentType
+  name           String
+  description    String?
+  templateFormat TemplateFormat
+  isDefault      Boolean           @default(false)
+  isActive       Boolean           @default(true)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  company        Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  versions       TemplateVersion[]
+  exports        ExportJob[]
+
+  @@index([companyId, documentType, isDefault])
+  @@index([companyId, name])
+}
+
+model TemplateVersion {
+  id            String   @id @default(cuid())
+  companyId     String
+  templateId    String
+  versionNumber Int
+  engineName    String
+  sourcePath    String?
+  sourceJson    Json?
+  configJson    Json?
+  variablesJson Json?
+  isPublished   Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  template      Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([templateId, versionNumber])
+  @@index([companyId, templateId])
+}
+
+model ExportJob {
+  id                String       @id @default(cuid())
+  companyId         String
+  documentId        String
+  templateId        String?
+  templateVersionId String?
+  exportFormat      ExportFormat
+  status            ExportStatus @default(PENDING)
+  outputPath        String?
+  errorMessage      String?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime     @default(now())
+  company           Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  document          Document     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  template          Template?    @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, status, createdAt])
+  @@index([companyId, documentId])
+}
+
+model ImportJob {
+  id             String            @id @default(cuid())
+  companyId      String
+  createdById    String
+  importType     ImportType
+  sourceFileName String
+  sourceFilePath String
+  status         ImportStatus      @default(PENDING)
+  errorMessage   String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  company        Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  results        ImportJobResult[]
+
+  @@index([companyId, status, createdAt])
+}
+
+model ImportJobResult {
+  id              String        @id @default(cuid())
+  companyId       String
+  importJobId     String
+  extractedType   DocumentType?
+  confidenceScore Decimal?      @db.Decimal(5, 2)
+  extractedJson   Json
+  normalizedJson  Json?
+  warningJson     Json?
+  createdAt       DateTime      @default(now())
+  company         Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  importJob       ImportJob     @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, importJobId])
+}
+
+model Payment {
+  id          String              @id @default(cuid())
+  companyId   String
+  clientId    String
+  createdById String
+  paymentDate DateTime
+  amount      Decimal             @db.Decimal(14, 2)
+  method      PaymentMethod
+  reference   String?
+  notes       String?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  company     Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  client      Client              @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  createdBy   User                @relation("PaymentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  allocations PaymentAllocation[]
+
+  @@index([companyId, clientId, paymentDate])
+}
+
+model PaymentAllocation {
+  id              String   @id @default(cuid())
+  companyId       String
+  paymentId       String
+  documentId      String
+  amountAllocated Decimal  @db.Decimal(14, 2)
+  createdAt       DateTime @default(now())
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  payment         Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Restrict)
+
+  @@unique([paymentId, documentId])
+  @@index([companyId, documentId])
+}
+
+model NotificationRule {
+  id               String              @id @default(cuid())
+  companyId        String
+  isEnabled        Boolean             @default(true)
+  notificationType NotificationType
+  channel          NotificationChannel @default(EMAIL)
+  daysBeforeDue    Int?
+  daysAfterDue     Int?
+  sendTime         String              @default("09:00")
+  templateSubject  String?
+  templateBody     String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  company          Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, isEnabled])
+}
+
+model NotificationEvent {
+  id               String              @id @default(cuid())
+  companyId        String
+  documentId       String
+  notificationType NotificationType
+  channel          NotificationChannel
+  status           NotificationStatus  @default(PENDING)
+  eventKey         String?
+  recipient        String?
+  title            String?
+  body             String?
+  actionPath       String?
+  metadataJson     Json?
+  sentAt           DateTime?
+  errorMessage     String?
+  createdAt        DateTime            @default(now())
+  company          Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  document         Document            @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  reads            NotificationRead[]
+
+  @@index([companyId, status, createdAt])
+  @@index([companyId, documentId])
+  @@unique([companyId, eventKey])
+}
+
+model NotificationRead {
+  id                  String            @id @default(cuid())
+  notificationEventId String
+  userId              String
+  readAt              DateTime          @default(now())
+  event               NotificationEvent @relation(fields: [notificationEventId], references: [id], onDelete: Cascade)
+  user                User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([notificationEventId, userId])
+  @@index([userId, readAt])
+}
+
+model CompanySetting {
+  id        String   @id @default(cuid())
+  companyId String
+  key       String
+  valueJson Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, key])
+}
