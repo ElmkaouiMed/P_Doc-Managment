@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { useI18n } from "@/i18n/provider";
 
 type RouteErrorProps = {
   error: Error & { digest?: string };
@@ -15,6 +16,8 @@ const DATABASE_UNAVAILABLE_PATTERNS = [
 ];
 
 export default function AppRouteError({ error, reset }: RouteErrorProps) {
+  const { t } = useI18n();
+
   useEffect(() => {
     console.error(error);
   }, [error]);
@@ -27,19 +30,19 @@ export default function AppRouteError({ error, reset }: RouteErrorProps) {
     <div className="flex min-h-[60vh] items-center justify-center px-6 py-10">
       <div className="w-full max-w-xl space-y-4 rounded-md border border-border bg-card/80 p-6">
         <h2 className="text-lg font-semibold text-foreground">
-          {isDatabaseUnavailable ? "Database connection problem" : "Something went wrong"}
+          {isDatabaseUnavailable ? t("errors.app.title.dbUnavailable") : t("errors.app.title.generic")}
         </h2>
         <p className="text-sm text-muted-foreground">
           {isDatabaseUnavailable
-            ? `${error.message} Once the database is back online, retry this page.`
-            : "An unexpected error happened while loading this page."}
+            ? t("errors.app.description.dbUnavailable")
+            : t("errors.app.description.generic")}
         </p>
         <button
           type="button"
           onClick={reset}
           className="inline-flex h-9 items-center justify-center rounded-md border border-primary/40 bg-primary/10 px-3 text-xs font-semibold text-primary transition hover:border-primary hover:text-primary-foreground"
         >
-          Retry
+          {t("common.retry")}
         </button>
       </div>
     </div>

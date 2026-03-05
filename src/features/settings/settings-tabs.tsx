@@ -142,6 +142,30 @@ const TEMPLATE_VARIABLE_BASE_GROUPS = [
   },
 ] as const;
 
+const COLUMN_DATA_TYPE_OPTION_KEYS: Array<{ value: ColumnDataType; labelKey: string }> = [
+  { value: "text", labelKey: "settings.templates.dataType.text" },
+  { value: "number", labelKey: "settings.templates.dataType.number" },
+  { value: "currency", labelKey: "settings.templates.dataType.currency" },
+  { value: "unit", labelKey: "settings.templates.dataType.unit" },
+  { value: "select", labelKey: "settings.templates.dataType.select" },
+  { value: "image", labelKey: "settings.templates.dataType.image" },
+];
+
+function parseSelectOptionsText(value: string) {
+  const normalized = value
+    .split(/[,\n]/g)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  return Array.from(new Set(normalized));
+}
+
+function selectOptionsToText(options: string[] | undefined) {
+  if (!options?.length) {
+    return "";
+  }
+  return options.join(", ");
+}
+
 function lineVariableNamesFromColumns(columns: TemplateLineColumn[]) {
   const output = [
     "line.designation",
@@ -734,6 +758,7 @@ function TemplatesTab() {
   const [newUnit, setNewUnit] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [newType, setNewType] = useState<ColumnDataType>("text");
+  const [newSelectOptions, setNewSelectOptions] = useState("");
   const [newRequired, setNewRequired] = useState(false);
   const [templates, setTemplates] = useState<TemplateAssetRow[]>([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
@@ -833,7 +858,17 @@ function TemplatesTab() {
         if (column.id === "designation") {
           return { ...column, enabled: true, required: true, system: true };
         }
-        return { ...column, ...patch };
+        const next = { ...column, ...patch };
+        if (next.dataType === "select") {
+          return {
+            ...next,
+            selectOptions: parseSelectOptionsText(selectOptionsToText(next.selectOptions)),
+          };
+        }
+        return {
+          ...next,
+          selectOptions: [],
+        };
       }),
     );
   };
@@ -862,18 +897,22 @@ function TemplatesTab() {
       return;
     }
 
+    const selectOptions = newType === "select" ? parseSelectOptionsText(newSelectOptions) : [];
+
     setColumns((current) => [
       ...current,
       {
         id,
         label,
         dataType: newType,
+        selectOptions,
         required: newRequired,
         enabled: true,
         system: false,
       },
     ]);
     setNewLabel("");
+    setNewSelectOptions("");
     setNewRequired(false);
     setNewType("text");
     success(t("settings.templates.toasts.columnAdded"));
@@ -1324,7 +1363,7 @@ function TemplatesTab() {
         <div className="space-y-2 rounded-md border border-border bg-background/20 p-3">
         <p className="text-muted-foreground">{t("settings.templates.lineColumns")}</p>
         {columns.map((column) => (
-          <div key={column.id} className="grid items-end gap-2 rounded-sm border border-border bg-background/30 p-2 md:grid-cols-[1.4fr_1fr_auto_auto_auto]">
+          <div key={column.id} className="grid items-end gap-2 rounded-sm border border-border bg-background/30 p-2 md:grid-cols-[1.2fr_1fr_1.4fr_auto_auto_auto]">
             <div className="text-foreground">
               <p className="font-semibold">{column.label}</p>
               <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{column.id}</p>
@@ -1335,12 +1374,19 @@ function TemplatesTab() {
               value={column.dataType}
               disabled={column.system}
               onChange={(value) => updateColumn(column.id, { dataType: value as ColumnDataType })}
-              options={[
-                { value: "text", label: t("settings.templates.dataType.text") },
-                { value: "number", label: t("settings.templates.dataType.number") },
-                { value: "currency", label: t("settings.templates.dataType.currency") },
-                { value: "unit", label: t("settings.templates.dataType.unit") },
-              ]}
+              options={COLUMN_DATA_TYPE_OPTION_KEYS.map((item) => ({
+                value: item.value,
+                label: t(item.labelKey),
+              }))}
+              className="text-[11px]"
+            />
+            <FormField
+              type="text"
+              label={t("settings.templates.dataType.selectOptions")}
+              value={selectOptionsToText(column.selectOptions)}
+              disabled={column.system || column.dataType !== "select"}
+              onChange={(value) => updateColumn(column.id, { selectOptions: parseSelectOptionsText(value) })}
+              placeholder={t("settings.templates.placeholders.selectOptions")}
               className="text-[11px]"
             />
             <FormField
@@ -1366,29 +1412,37 @@ function TemplatesTab() {
       ) : null}
 
       {innerTab === "columns" ? (
-        <div className="grid items-end gap-2 rounded-md border border-border bg-background/20 p-3 md:grid-cols-[2fr_1fr_1fr_1fr_auto]">
-          <FormField
-            type="text"
-            label={t("settings.templates.newColumnLabel")}
-            value={newLabel}
-            onChange={setNewLabel}
-            placeholder={t("settings.templates.placeholders.newColumnLabel")}
-            className="md:col-span-2"
-          />
-          <FormField
-            type="select"
-            label={t("settings.templates.dataType.label")}
-            value={newType}
-            onChange={(value) => setNewType(value as ColumnDataType)}
-            options={[
-              { value: "text", label: t("settings.templates.dataType.text") },
-              { value: "number", label: t("settings.templates.dataType.number") },
-              { value: "currency", label: t("settings.templates.dataType.currency") },
-              { value: "unit", label: t("settings.templates.dataType.unit") },
-            ]}
-          />
-          <FormField type="checkbox" label={t("settings.templates.required")} checked={newRequired} onCheckedChange={setNewRequired} />
-          <UiButton type="button" size="sm" iconOnly iconName="plus" variant="outline" onClick={addCustomColumn}/>
+        <div className="space-y-2 rounded-md border border-border bg-background/20 p-3">
+          <div className="grid items-end gap-2 md:grid-cols-[2fr_1fr_1fr_auto]">
+            <FormField
+              type="text"
+              label={t("settings.templates.newColumnLabel")}
+              value={newLabel}
+              onChange={setNewLabel}
+              placeholder={t("settings.templates.placeholders.newColumnLabel")}
+            />
+            <FormField
+              type="select"
+              label={t("settings.templates.dataType.label")}
+              value={newType}
+              onChange={(value) => setNewType(value as ColumnDataType)}
+              options={COLUMN_DATA_TYPE_OPTION_KEYS.map((item) => ({
+                value: item.value,
+                label: t(item.labelKey),
+              }))}
+            />
+            <FormField type="checkbox" label={t("settings.templates.required")} checked={newRequired} onCheckedChange={setNewRequired} />
+            <UiButton type="button" size="sm" iconOnly iconName="plus" variant="outline" onClick={addCustomColumn}/>
+          </div>
+          {newType === "select" ? (
+            <FormField
+              type="text"
+              label={t("settings.templates.dataType.selectOptions")}
+              value={newSelectOptions}
+              onChange={setNewSelectOptions}
+              placeholder={t("settings.templates.placeholders.selectOptions")}
+            />
+          ) : null}
         </div>
       ) : null}
 

@@ -40,12 +40,13 @@ export const DOCUMENT_TYPE_LABELS: Record<DocumentType, string> = {
   EXTRACT_BON_COMMANDE_PUBLIC: "Extract bon commande public",
 };
 
-export type ColumnDataType = "text" | "number" | "currency" | "unit";
+export type ColumnDataType = "text" | "number" | "currency" | "unit" | "select" | "image";
 
 export type TemplateLineColumn = {
   id: string;
   label: string;
   dataType: ColumnDataType;
+  selectOptions?: string[];
   required: boolean;
   enabled: boolean;
   system: boolean;
@@ -310,16 +311,34 @@ function writeJson<T>(name: string, value: T) {
   window.localStorage.setItem(tenantKey(name), JSON.stringify(value));
 }
 
+function sanitizeSelectOptions(input: unknown) {
+  if (!Array.isArray(input)) {
+    return [] as string[];
+  }
+  const normalized = input
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
+  return Array.from(new Set(normalized));
+}
+
 function normalizeColumn(column: TemplateLineColumn): TemplateLineColumn {
   const cleanId = column.id.trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_");
   const isDesignation = cleanId === "designation";
   const isUnit = cleanId === "unite";
   const dataType: ColumnDataType =
-    column.dataType === "number" || column.dataType === "currency" || column.dataType === "unit" ? column.dataType : "text";
+    column.dataType === "number" ||
+    column.dataType === "currency" ||
+    column.dataType === "unit" ||
+    column.dataType === "select" ||
+    column.dataType === "image"
+      ? column.dataType
+      : "text";
+  const selectOptions = dataType === "select" ? sanitizeSelectOptions(column.selectOptions) : [];
   return {
     id: cleanId || "custom_col",
     label: column.label.trim() || "Custom",
     dataType: isUnit ? "unit" : dataType,
+    selectOptions,
     enabled: isDesignation ? true : column.enabled,
     required: isDesignation ? true : column.required,
     system: isDesignation || isUnit ? true : column.system,

@@ -45,23 +45,46 @@ export const viewport: Viewport = {
 
 const EXTENSION_ATTRS_GUARD = `
 (() => {
-  const attrs = ["bis_skin_checked"];
+  const knownAttrs = ["bis_skin_checked", "bis_register"];
+  const isInjectedAttr = (name) => name.startsWith("bis_") || knownAttrs.includes(name);
+  const stripInjectedAttrs = (el) => {
+    Array.from(el.attributes).forEach((attr) => {
+      if (isInjectedAttr(attr.name)) {
+        el.removeAttribute(attr.name);
+      }
+    });
+  };
 
   const cleanupNode = (node) => {
     if (!node || node.nodeType !== 1) return;
-    for (const attr of attrs) {
-      if (node.hasAttribute(attr)) {
-        node.removeAttribute(attr);
-      }
-      node.querySelectorAll("[" + attr + "]").forEach((el) => el.removeAttribute(attr));
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
+    let current = walker.currentNode;
+    while (current) {
+      stripInjectedAttrs(current);
+      current = walker.nextNode();
     }
   };
 
-  cleanupNode(document.documentElement);
+  const cleanupDocument = () => cleanupNode(document.documentElement);
+  cleanupDocument();
+
+  // Sweep for a short period on animation frames to catch extension writes
+  // that happen between parse and hydration in development.
+  let rafRuns = 0;
+  const rafSweep = () => {
+    cleanupDocument();
+    rafRuns += 1;
+    if (rafRuns < 180) {
+      window.requestAnimationFrame(rafSweep);
+    }
+  };
+  if (typeof window.requestAnimationFrame === "function") {
+    window.requestAnimationFrame(rafSweep);
+  }
 
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
-      if (mutation.type === "attributes" && mutation.attributeName && attrs.includes(mutation.attributeName)) {
+      if (mutation.type === "attributes" && mutation.attributeName && isInjectedAttr(mutation.attributeName)) {
         mutation.target.removeAttribute(mutation.attributeName);
       }
       mutation.addedNodes.forEach((node) => cleanupNode(node));
@@ -72,11 +95,9 @@ const EXTENSION_ATTRS_GUARD = `
     subtree: true,
     childList: true,
     attributes: true,
-    attributeFilter: attrs,
   });
 
-  window.addEventListener("load", () => observer.disconnect(), { once: true });
-  setTimeout(() => observer.disconnect(), 5000);
+  window.addEventListener("beforeunload", () => observer.disconnect(), { once: true });
 })();
 `;
 

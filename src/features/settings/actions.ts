@@ -91,7 +91,7 @@ type DocumentTypeKey = (typeof ALL_DOCUMENT_TYPES)[number];
 type ExportFormat = (typeof EXPORT_FORMATS)[number];
 type ViewMode = "table" | "grid";
 type ViewPreferenceScope = "documents" | "clients" | "products";
-type ColumnDataType = "text" | "number" | "currency" | "unit";
+type ColumnDataType = "text" | "number" | "currency" | "unit" | "select" | "image";
 
 type EmailConfigInput = {
   mode: EmailConfigMode;
@@ -141,6 +141,7 @@ type TemplateLineColumnInput = {
   id: string;
   label: string;
   dataType: ColumnDataType;
+  selectOptions?: string[];
   required: boolean;
   enabled: boolean;
   system: boolean;
@@ -248,6 +249,16 @@ function sanitizeUnits(raw: unknown): string[] {
   return unique.length ? unique : [...DEFAULT_UNITS];
 }
 
+function sanitizeSelectOptions(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const normalized = raw
+    .map((item) => cleanText(item))
+    .filter((item) => item.length > 0);
+  return Array.from(new Set(normalized));
+}
+
 function normalizeColumn(column: TemplateLineColumnInput): TemplateLineColumnInput {
   const cleanId = cleanText(column.id)
     .toLowerCase()
@@ -255,13 +266,19 @@ function normalizeColumn(column: TemplateLineColumnInput): TemplateLineColumnInp
   const isDesignation = cleanId === "designation";
   const isUnit = cleanId === "unite";
   const dataType: ColumnDataType =
-    column.dataType === "number" || column.dataType === "currency" || column.dataType === "unit"
+    column.dataType === "number" ||
+    column.dataType === "currency" ||
+    column.dataType === "unit" ||
+    column.dataType === "select" ||
+    column.dataType === "image"
       ? column.dataType
       : "text";
+  const selectOptions = dataType === "select" ? sanitizeSelectOptions(column.selectOptions) : [];
   return {
     id: cleanId || "custom_col",
     label: cleanText(column.label) || "Custom",
     dataType: isUnit ? "unit" : dataType,
+    selectOptions,
     enabled: isDesignation ? true : Boolean(column.enabled),
     required: isDesignation ? true : Boolean(column.required),
     system: isDesignation || isUnit ? true : Boolean(column.system),

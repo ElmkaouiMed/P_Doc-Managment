@@ -163,6 +163,16 @@ function normalizeUnitInput(value: string) {
   return value.trim();
 }
 
+function normalizeSelectOptions(options: string[] | undefined) {
+  if (!options?.length) {
+    return [] as string[];
+  }
+  const normalized = options
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  return Array.from(new Set(normalized));
+}
+
 function normalizeLineValues(values: Record<string, string>, defaultUnit = "u") {
   return {
     ...values,
@@ -318,13 +328,20 @@ export function NewDocumentModal({
         return;
       }
 
-      const nextEnabledTypes = businessResult.ok
+      const configuredTypes = businessResult.ok
         ? (businessResult.config.enabledDocumentTypes as DocumentType[])
         : ["DEVIS", "FACTURE", "FACTURE_PROFORMA", "BON_LIVRAISON", "BON_COMMANDE"];
       const preferredType = initialDocument
         ? initialDocument.type
-        : getDefaultType(nextEnabledTypes);
-      const nextType = nextEnabledTypes.includes(preferredType) ? preferredType : getDefaultType(nextEnabledTypes);
+        : getDefaultType(configuredTypes);
+      const nextEnabledTypes =
+        initialDocument && !configuredTypes.includes(preferredType)
+          ? [preferredType, ...configuredTypes]
+          : configuredTypes;
+      const nextType =
+        initialDocument
+          ? preferredType
+          : (nextEnabledTypes.includes(preferredType) ? preferredType : getDefaultType(nextEnabledTypes));
 
       const columnsResult = await getCompanyTemplateColumnsAction(nextType);
       if (!mounted) {
@@ -609,6 +626,28 @@ export function NewDocumentModal({
     return column.label;
   };
 
+  const updateLineImageFromFile = (lineId: string, columnId: string, file: File | null) => {
+    if (!file) {
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      error(t("documents.form.toasts.imageInvalidType"));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        error(t("documents.form.toasts.imageLoadFailed"));
+        return;
+      }
+      updateLine(lineId, columnId, reader.result);
+    };
+    reader.onerror = () => {
+      error(t("documents.form.toasts.imageLoadFailed"));
+    };
+    reader.readAsDataURL(file);
+  };
+
   const renderLineField = (line: LineDraft, column: TemplateLineColumn) => {
     if (column.id === "designation") {
       return (
@@ -628,6 +667,8 @@ export function NewDocumentModal({
       );
     }
 
+    const isSelectField = column.dataType === "select";
+    const isImageField = column.dataType === "image";
     const isUnitField = column.dataType === "unit" || column.id === "unite";
     const isReadOnlyTotal = column.id === "pt";
     const isNumericField =
@@ -640,6 +681,96 @@ export function NewDocumentModal({
       column.id === "unite"
         ? (line.values.unite || defaultUnit)
         : (line.values[column.id] || "");
+
+    if (isImageField) {
+      const fileInputId = `line-${line.id}-${column.id}-image`;
+      return (
+        <div className="grid gap-1 text-xs">
+          <span className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{lineFieldLabel(column)}</span>
+          <div className="flex items-center gap-1.5 rounded-md border border-border bg-background/40 p-1.5">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-background/60">
+              {value ? (
+                // `value` can be a URL or a data URL.
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={value} alt={lineFieldLabel(column)} className="h-full w-full object-contain" />
+              ) : (
+                <span className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground">img</span>
+              )}
+            </div>
+            <FormField
+              type="text"
+              value={value}
+              onChange={(next) => updateLine(line.id, column.id, next)}
+              placeholder={t("documents.form.imageUrlPlaceholder")}
+              className="min-w-0 flex-1"
+              inputClassName="h-8 text-[11px]"
+            />
+            <input
+              id={fileInputId}
+              type="file"
+              accept="image/*"
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0] ?? null;
+                updateLineImageFromFile(line.id, column.id, file);
+                event.currentTarget.value = "";
+              }}
+              className="hidden"
+            />
+            <UiButton
+              type="button"
+              size="xs"
+              variant="outline"
+              onClick={() => {
+                const element = document.getElementById(fileInputId) as HTMLInputElement | null;
+                element?.click();
+              }}
+            >
+              {t("documents.form.imageUpload")}
+            </UiButton>
+            {value ? (
+              <UiButton
+                type="button"
+                size="xs"
+                variant="ghost"
+                onClick={() => updateLine(line.id, column.id, "")}
+              >
+                {t("documents.form.imageRemove")}
+              </UiButton>
+            ) : null}
+          </div>
+        </div>
+      );
+    }
+
+    if (isSelectField) {
+      const selectOptions = normalizeSelectOptions(column.selectOptions);
+      if (selectOptions.length === 0) {
+        return (
+          <FormField
+            type="text"
+            label={lineFieldLabel(column)}
+            value={value}
+            onChange={(next) => updateLine(line.id, column.id, next)}
+            placeholder={t("documents.form.selectPlaceholder")}
+            hint={t("documents.form.selectNoOptions")}
+            inputClassName="h-9 text-[12px]"
+          />
+        );
+      }
+      return (
+        <FormField
+          type="select"
+          label={lineFieldLabel(column)}
+          value={value}
+          onChange={(next) => updateLine(line.id, column.id, next)}
+          options={[
+            { value: "", label: t("documents.form.selectPlaceholder") },
+            ...selectOptions.map((option) => ({ value: option, label: option })),
+          ]}
+          inputClassName="h-9 text-[12px]"
+        />
+      );
+    }
 
     if (isUnitField) {
       return (
@@ -970,7 +1101,7 @@ export function NewDocumentModal({
       ) : null}
       {isOpen ? (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-3 sm:p-4">
-          <div className="flex h-[86vh] max-h-[86vh] w-full max-w-7xl flex-col overflow-hidden rounded-xl border border-border bg-card p-3 shadow-2xl shadow-black/50 sm:p-4">
+          <div className="flex min-h-0 max-h-[86vh] w-full max-w-7xl flex-col overflow-hidden rounded-xl border border-border bg-card p-3 shadow-2xl shadow-black/50 sm:p-4">
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <p className="text-xs uppercase tracking-[0.4em] text-muted-foreground">{t("documents.form.documentTag")}</p>
@@ -1018,11 +1149,11 @@ export function NewDocumentModal({
             </div>
 
             <div className="min-h-0 flex flex-1 flex-col overflow-hidden">
-              <div className="min-h-0 flex-1 overflow-y-auto pr-1 sm:pr-2">
+              <div className="min-h-0 overflow-y-auto pr-1 sm:pr-2">
                 {step === "type" ? (
                   <div className="h-full space-y-3 overflow-y-auto pr-1 sm:pr-2">
                     <p className="text-xs text-muted-foreground">{t("documents.form.typeHint")}</p>
-                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <div className={` grid items-center justify-center gap-3 md:grid-cols-4`}>
                       {enabledTypes.map((documentType) => (
                         <button
                           key={documentType}
@@ -1102,69 +1233,69 @@ export function NewDocumentModal({
 
                 {step === "articles" ? (
                   <div className="grid h-full min-h-0 gap-3 xl:grid-cols-[minmax(0,1.3fr)_minmax(280px,0.7fr)]">
-                  <section className="flex min-h-0 flex-col rounded-xl border border-border bg-card/70 p-3">
-                    <div className="mb-3 flex items-center justify-between rounded-lg border border-border/70 bg-background/30 px-3 py-2">
-                      <div>
-                        <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("documents.form.step3")}</p>
-                        <p className="text-xs text-muted-foreground">{t("documents.form.footerHint")}</p>
-                      </div>
-                      <div className="flex flex-wrap items-center justify-end gap-2">
-                        <span className="text-[11px] text-muted-foreground">
-                          {t("documents.form.selectedCount").replace("{count}", String(selectedLinesCount))}
-                        </span>
-                        <UiButton type="button" size="xs" variant="ghost" onClick={toggleSelectAllLines}>
-                          {allLinesSelected ? t("documents.form.clearSelection") : t("documents.form.selectAll")}
-                        </UiButton>
-                        <UiButton type="button" size="xs" variant="outline" icon="export" disabled={!selectedLinesCount} onClick={exportSelectedLines}>
-                          {t("documents.form.exportSelected")}
-                        </UiButton>
-                        <UiButton type="button" size="xs" variant="danger" icon="remove" disabled={!selectedLinesCount} onClick={removeSelectedLines}>
-                          {t("documents.form.deleteSelected")}
-                        </UiButton>
-                        <UiButton type="button" size="sm" variant="outline" icon="plus" onClick={() => addLine()} />
-                      </div>
-                    </div>
-
-                    <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-                      {lines.map((line, index) => {
-                        const isSelected = selectedLineIds.includes(line.id);
-                        return (
-                        <div
-                          key={line.id}
-                          className={
-                            isSelected
-                              ? "rounded-lg border border-primary/50 bg-primary/5 p-2.5"
-                              : "rounded-lg border border-border bg-background/35 p-2.5"
-                          }
-                        >
-                          <div className="mb-2 flex items-center justify-between gap-2">
-                            <div className="flex min-w-0 items-center gap-2">
-                              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-border bg-background/60 px-2 py-1 text-[11px] text-muted-foreground">
-                                <input
-                                  type="checkbox"
-                                  checked={isSelected}
-                                  onChange={() => toggleLineSelection(line.id)}
-                                  className="h-3.5 w-3.5 accent-primary"
-                                />
-                                <span>{t("documents.form.select")}</span>
-                              </label>
-                              <p className="shrink-0 rounded-md border border-border bg-background/70 px-2 py-1 text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
-                                #{String(index + 1).padStart(2, "0")}
-                              </p>
-                            </div>
-                            <UiButton type="button" size="xs" variant="danger" iconOnly icon="remove" onClick={() => removeLine(line.id)} />
-                          </div>
-
-                            <div className="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
-                              {orderedLineColumns.map((column) => (
-                                <div key={column.id}>
-                                  {renderLineField(line, column)}
-                                </div>
-                              ))}
-                            </div>
+                    <section className="flex min-h-0 flex-col rounded-xl border border-border bg-card/70 p-3">
+                      <div className="mb-3 flex items-center justify-between rounded-lg border border-border/70 bg-background/30 px-3 py-2">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("documents.form.step3")}</p>
+                          <p className="text-xs text-muted-foreground">{t("documents.form.footerHint")}</p>
                         </div>
-                      )})}
-                    </div>
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                          <span className="text-[11px] text-muted-foreground">
+                            {t("documents.form.selectedCount").replace("{count}", String(selectedLinesCount))}
+                          </span>
+                          <UiButton type="button" size="xs" variant="ghost" onClick={toggleSelectAllLines}>
+                            {allLinesSelected ? t("documents.form.clearSelection") : t("documents.form.selectAll")}
+                          </UiButton>
+                          <UiButton type="button" size="xs" variant="outline" icon="export" disabled={!selectedLinesCount} onClick={exportSelectedLines}>
+                            {t("documents.form.exportSelected")}
+                          </UiButton>
+                          <UiButton type="button" size="xs" variant="danger" icon="remove" disabled={!selectedLinesCount} onClick={removeSelectedLines}>
+                            {t("documents.form.deleteSelected")}
+                          </UiButton>
+                          <UiButton type="button" size="sm" variant="outline" icon="plus" onClick={() => addLine()} />
+                        </div>
+                      </div>
+
+                      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+                        {lines.map((line, index) => {
+                          const isSelected = selectedLineIds.includes(line.id);
+                          return (
+                          <div
+                            key={line.id}
+                            className={
+                              isSelected
+                                ? "rounded-lg border border-primary/50 bg-primary/5 p-2.5"
+                                : "rounded-lg border border-border bg-background/35 p-2.5"
+                            }
+                          >
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-border bg-background/60 px-2 py-1 text-[11px] text-muted-foreground">
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    onChange={() => toggleLineSelection(line.id)}
+                                    className="h-3.5 w-3.5 accent-primary"
+                                  />
+                                  <span>{t("documents.form.select")}</span>
+                                </label>
+                                <p className="shrink-0 rounded-md border border-border bg-background/70 px-2 py-1 text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+                                  #{String(index + 1).padStart(2, "0")}
+                                </p>
+                              </div>
+                              <UiButton type="button" size="xs" variant="danger" iconOnly icon="remove" onClick={() => removeLine(line.id)} />
+                            </div>
+
+                              <div className="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
+                                {orderedLineColumns.map((column) => (
+                                  <div key={column.id}>
+                                    {renderLineField(line, column)}
+                                  </div>
+                                ))}
+                              </div>
+                          </div>
+                        )})}
+                      </div>
 
                       <datalist id="saved-articles-list">
                         {savedArticles.map((article) => (
