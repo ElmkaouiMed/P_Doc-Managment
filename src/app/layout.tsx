@@ -1,7 +1,8 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Cairo, Geist, Geist_Mono } from "next/font/google";
 import Script from "next/script";
 
+import { PwaRegistrar } from "@/components/pwa/pwa-registrar";
 import { AppProviders } from "@/components/providers/app-providers";
 import { getServerI18n } from "@/i18n/server";
 import "./globals.css";
@@ -24,6 +25,22 @@ const cairo = Cairo({
 export const metadata: Metadata = {
   title: "DOC_v1 Admin",
   description: "Documents-first multi-tenant platform",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    title: "DOC_v1",
+    statusBarStyle: "black-translucent",
+  },
+  icons: {
+    icon: [{ url: "/favicon.ico" }],
+    apple: [{ url: "/favicon.ico" }],
+    shortcut: [{ url: "/favicon.ico" }],
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0f172a",
+  colorScheme: "dark",
 };
 
 const EXTENSION_ATTRS_GUARD = `
@@ -77,6 +94,7 @@ export default async function RootLayout({
         <Script id="extension-attrs-guard" strategy="beforeInteractive">
           {EXTENSION_ATTRS_GUARD}
         </Script>
+        <PwaRegistrar />
         <AppProviders fontVariables={fontVariables} initialLocale={locale}>
           {children}
         </AppProviders>

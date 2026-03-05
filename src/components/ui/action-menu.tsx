@@ -28,6 +28,7 @@ type ActionMenuProps = {
   sections: ActionMenuSection[];
   className?: string;
   menuClassName?: string;
+  menuZIndex?: number;
   triggerAriaLabel?: string;
   triggerTitle?: string;
   triggerVariant?: "primary" | "ghost" | "subtle" | "danger" | "outline";
@@ -39,6 +40,7 @@ export function ActionMenu({
   sections,
   className,
   menuClassName,
+  menuZIndex = 9999,
   triggerAriaLabel = "Open actions",
   triggerTitle,
   triggerVariant = "outline",
@@ -85,7 +87,7 @@ export function ActionMenu({
         position: "fixed",
         top,
         left,
-        zIndex: 9999,
+        zIndex: menuZIndex,
       });
     };
 
@@ -116,7 +118,7 @@ export function ActionMenu({
       window.removeEventListener("resize", updatePosition);
       window.removeEventListener("scroll", updatePosition, true);
     };
-  }, [isOpen]);
+  }, [isOpen, menuZIndex]);
 
   const handleSelect = (item: ActionMenuItem) => {
     if (item.disabled) {

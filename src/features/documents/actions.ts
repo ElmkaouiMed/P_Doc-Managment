@@ -90,9 +90,267 @@ type SendDocumentEmailInput = {
   body: string;
 };
 
+export async function getDocumentFormLibrariesAction() {
+  const auth = await requireAuthContext();
+
+  const [clients, products] = await Promise.all([
+    prisma.client.findMany({
+      where: { companyId: auth.company.id },
+      orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+      take: 500,
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        address: true,
+        ice: true,
+        ifNumber: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.product.findMany({
+      where: {
+        companyId: auth.company.id,
+        isActive: true,
+      },
+      orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+      take: 700,
+      select: {
+        id: true,
+        name: true,
+        unit: true,
+        priceHT: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+  ]);
+
+  return {
+    ok: true as const,
+    clients: clients.map((item) => ({
+      id: item.id,
+      name: item.name || "",
+      email: item.email || "",
+      phone: item.phone || "",
+      address: item.address || "",
+      ice: item.ice || "",
+      ifNumber: item.ifNumber || "",
+      createdAt: item.createdAt.toISOString(),
+      updatedAt: item.updatedAt.toISOString(),
+    })),
+    articles: products.map((item) => ({
+      id: item.id,
+      designation: item.name || "",
+      values: {
+        designation: item.name || "",
+        unite: item.unit || "u",
+        pu: Number(item.priceHT || 0).toFixed(2),
+      },
+      createdAt: item.createdAt.toISOString(),
+      updatedAt: item.updatedAt.toISOString(),
+    })),
+  };
+}
+
 const STORAGE_ROOT = path.resolve(process.cwd(), "..", "storage");
 const EMAIL_CONFIG_KEY = "email-config";
 const MAX_IMPORT_FILE_SIZE = 12 * 1024 * 1024;
+
+type ParsedImportLine = DraftLineInput & {
+  import_row: string;
+  import_sheet: string;
+  import_category: string;
+};
+
+type ParsedImportWorkbook = {
+  lines: ParsedImportLine[];
+  warnings: string[];
+  sheetName: string;
+};
+
+function normalizeExcelText(value: unknown) {
+  if (value == null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value.replace(/\u00A0/g, " ").trim();
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return "";
+    }
+    return String(value);
+  }
+  return String(value).trim();
+}
+
+function normalizeSearchText(input: string) {
+  return input
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseExcelNumber(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  const text = normalizeExcelText(value);
+  if (!text) {
+    return null;
+  }
+  const normalized = text
+    .replace(/\u00A0/g, "")
+    .replace(/\s+/g, "")
+    .replace(/,/g, ".")
+    .replace(/[^0-9.-]/g, "");
+  if (!normalized || normalized === "." || normalized === "-" || normalized === "-.") {
+    return null;
+  }
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function includesAnyKeyword(input: string, keywords: string[]) {
+  const haystack = normalizeSearchText(input);
+  return keywords.some((keyword) => haystack.includes(normalizeSearchText(keyword)));
+}
+
+function detectExcelColumns(rows: string[][]) {
+  const designationKeywords = ["designation", "designation des ouvrages", "ouvrage", "ouvrages", "article", "description", "objet", "libelle", "item"];
+  const unitKeywords = ["unite", "unit"];
+  const qtyKeywords = ["qte", "quantite", "quantity", "qty"];
+  const unitPriceKeywords = ["prix unitaire", "p.u", "pu", "unit price"];
+  const totalKeywords = ["pt", "prix total", "total ht", "montant"];
+
+  for (let rowIndex = 0; rowIndex < Math.min(rows.length, 40); rowIndex += 1) {
+    const row = rows[rowIndex];
+    const normalized = row.map((cell) => cell.toLowerCase());
+    const designation = normalized.findIndex((cell) => includesAnyKeyword(cell, designationKeywords));
+    const qty = normalized.findIndex((cell) => includesAnyKeyword(cell, qtyKeywords));
+    const unit = normalized.findIndex((cell) => includesAnyKeyword(cell, unitKeywords));
+    const unitPrice = normalized.findIndex((cell) => includesAnyKeyword(cell, unitPriceKeywords));
+    const total = normalized.findIndex((cell) => includesAnyKeyword(cell, totalKeywords));
+
+    if (designation >= 0 && (qty >= 0 || unit >= 0 || unitPrice >= 0 || total >= 0)) {
+      return {
+        startRow: rowIndex + 1,
+        designation,
+        unit,
+        qty,
+        unitPrice,
+        total,
+      };
+    }
+  }
+
+  return {
+    startRow: 0,
+    designation: 0,
+    unit: -1,
+    qty: -1,
+    unitPrice: -1,
+    total: -1,
+  };
+}
+
+async function parseExcelImportFile(fileBuffer: Buffer): Promise<ParsedImportWorkbook> {
+  const XLSX = await import("xlsx");
+  const workbook = XLSX.read(fileBuffer, { type: "buffer", cellDates: false });
+  const sheetName = workbook.SheetNames[0] || "Sheet1";
+  const worksheet = workbook.Sheets[sheetName];
+  if (!worksheet) {
+    return { lines: [], warnings: ["Unable to read worksheet."], sheetName };
+  }
+
+  const rawRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "", raw: true }) as unknown[][];
+  const rows = rawRows.map((row) => row.map((cell) => normalizeExcelText(cell)));
+  const columns = detectExcelColumns(rows);
+
+  const lines: ParsedImportLine[] = [];
+  const warnings: string[] = [];
+  let currentCategory = "";
+  let categoryCount = 0;
+  let subtotalCount = 0;
+
+  for (let rowIndex = columns.startRow; rowIndex < rows.length; rowIndex += 1) {
+    const textRow = rows[rowIndex];
+    if (!textRow.length) {
+      continue;
+    }
+    const nonEmptyText = textRow.map((cell) => cell.trim()).filter((cell) => cell.length > 0);
+    if (!nonEmptyText.length) {
+      continue;
+    }
+
+    const designation =
+      (columns.designation >= 0 ? textRow[columns.designation] : "") ||
+      nonEmptyText.find((cell) => Number.isNaN(Number(cell.replace(",", ".")))) ||
+      "";
+    const cleanDesignation = designation.trim();
+    if (!cleanDesignation) {
+      continue;
+    }
+
+    const unit = columns.unit >= 0 ? (textRow[columns.unit] || "").trim() : "";
+    const quantity = columns.qty >= 0 ? parseExcelNumber(rawRows[rowIndex]?.[columns.qty]) : null;
+    const unitPrice = columns.unitPrice >= 0 ? parseExcelNumber(rawRows[rowIndex]?.[columns.unitPrice]) : null;
+    const total = columns.total >= 0 ? parseExcelNumber(rawRows[rowIndex]?.[columns.total]) : null;
+
+    const hasQty = quantity != null && quantity > 0;
+    const hasPrice = unitPrice != null && unitPrice > 0;
+    const hasTotal = total != null && total > 0;
+    const lowerDesignation = cleanDesignation.toLowerCase();
+    const isSubtotalRow =
+      includesAnyKeyword(lowerDesignation, ["sous total", "subtotal", "total"]) &&
+      !hasPrice &&
+      !hasQty;
+    const isCategoryRow = !isSubtotalRow && !hasQty && !hasPrice && !hasTotal;
+
+    if (isSubtotalRow) {
+      subtotalCount += 1;
+      continue;
+    }
+    if (isCategoryRow) {
+      currentCategory = cleanDesignation;
+      categoryCount += 1;
+      continue;
+    }
+
+    const safeQty = hasQty ? Math.max(0, quantity || 0) : 1;
+    const safeUnitPrice = hasPrice ? Math.max(0, unitPrice || 0) : 0;
+    const safeTotal = hasTotal ? Math.max(0, total || 0) : safeQty * safeUnitPrice;
+    const withCategory = currentCategory ? `${currentCategory} - ${cleanDesignation}` : cleanDesignation;
+
+    lines.push({
+      designation: withCategory,
+      unite: unit || "u",
+      qte: formatDecimal(safeQty, 3),
+      pu: formatDecimal(safeUnitPrice, 2),
+      pt: formatDecimal(safeTotal, 2),
+      import_row: String(rowIndex + 1),
+      import_sheet: sheetName,
+      import_category: currentCategory,
+    });
+  }
+
+  if (categoryCount > 0) {
+    warnings.push(`Detected ${categoryCount} category row(s).`);
+  }
+  if (subtotalCount > 0) {
+    warnings.push(`Ignored ${subtotalCount} subtotal row(s).`);
+  }
+  if (lines.length === 0) {
+    warnings.push("No article lines detected.");
+  }
+
+  return { lines, warnings, sheetName };
+}
 
 function sanitizeFileName(fileName: string) {
   return fileName.replace(/[^a-zA-Z0-9._-]+/g, "_");
@@ -1409,27 +1667,28 @@ export async function queueExcelImportAction(formData: FormData) {
   const auth = await requireAuthContext();
   const file = formData.get("file");
   if (!(file instanceof File)) {
-    return { ok: false as const, error: "Excel file is required." };
+    return { ok: false as const, errorCode: "FILE_REQUIRED", error: "Excel file is required." };
   }
   if (file.size <= 0) {
-    return { ok: false as const, error: "Excel file is empty." };
+    return { ok: false as const, errorCode: "FILE_EMPTY", error: "Excel file is empty." };
   }
   if (file.size > MAX_IMPORT_FILE_SIZE) {
-    return { ok: false as const, error: "Excel file is too large." };
+    return { ok: false as const, errorCode: "FILE_TOO_LARGE", error: "Excel file is too large." };
   }
 
   const extension = path.extname(file.name || "").toLowerCase();
   if (extension !== ".xls" && extension !== ".xlsx") {
-    return { ok: false as const, error: "Only .xls and .xlsx files are supported." };
+    return { ok: false as const, errorCode: "INVALID_EXTENSION", error: "Only .xls and .xlsx files are supported." };
   }
 
   const safeOriginalName = sanitizeFileName(file.name || `import${extension || ".xlsx"}`);
   const storageFileName = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeOriginalName}`;
   const relativePath = path.join("document-imports", auth.company.id, storageFileName);
   const absolutePath = path.resolve(STORAGE_ROOT, relativePath);
+  const fileBuffer = Buffer.from(await file.arrayBuffer());
 
   await mkdir(path.dirname(absolutePath), { recursive: true });
-  await writeFile(absolutePath, Buffer.from(await file.arrayBuffer()));
+  await writeFile(absolutePath, fileBuffer);
 
   const job = await prisma.importJob.create({
     data: {
@@ -1438,7 +1697,7 @@ export async function queueExcelImportAction(formData: FormData) {
       importType: ImportType.BON_COMMANDE_PUBLIC,
       sourceFileName: safeOriginalName,
       sourceFilePath: relativePath,
-      status: "PENDING",
+      status: "RUNNING",
     },
     select: {
       id: true,
@@ -1448,15 +1707,151 @@ export async function queueExcelImportAction(formData: FormData) {
     },
   });
 
-  return {
-    ok: true as const,
-    job: {
-      id: job.id,
-      status: job.status,
-      createdAt: job.createdAt.toISOString(),
-      fileName: job.sourceFileName,
-    },
-  };
+  try {
+    const parsed = await parseExcelImportFile(fileBuffer);
+    if (!parsed.lines.length) {
+      await prisma.importJob.update({
+        where: { id: job.id },
+        data: {
+          status: "FAILED",
+          errorMessage: "No article lines were detected from the uploaded Excel file.",
+        },
+      });
+      return {
+        ok: false as const,
+        errorCode: "NO_ARTICLE_LINES",
+        error: "No article lines detected in Excel file. Check columns and try again.",
+      };
+    }
+
+    const tvaRate = 20;
+    const subtotalHT = parsed.lines.reduce((total, line) => total + toNumber(line.pt, 0), 0);
+    const totalTax = subtotalHT * (tvaRate / 100);
+    const totalTTC = subtotalHT + totalTax;
+    const importClientName = `Imported - ${path.parse(safeOriginalName).name}`.slice(0, 180);
+    const documentNumber = await nextDocumentNumber(auth.company.id, DocumentType.EXTRACT_BON_COMMANDE_PUBLIC);
+    const issueDate = new Date();
+
+    const created = await prisma.$transaction(async (tx) => {
+      const createdDocument = await tx.document.create({
+        data: {
+          companyId: auth.company.id,
+          createdById: auth.user.id,
+          clientId: null,
+          documentType: DocumentType.EXTRACT_BON_COMMANDE_PUBLIC,
+          documentNumber,
+          status: DocumentStatus.DRAFT,
+          issueDate,
+          dueDate: null,
+          language: "fr",
+          currency: "MAD",
+          subtotalHT,
+          totalTax,
+          totalTTC,
+          amountPaid: 0,
+          amountDue: totalTTC,
+          metadataJson: {
+            tvaRate,
+            clientSnapshot: buildClientSnapshot({
+              name: importClientName,
+            }),
+            importSource: {
+              importJobId: job.id,
+              fileName: safeOriginalName,
+              sheetName: parsed.sheetName,
+              warnings: parsed.warnings,
+            },
+          },
+        },
+        select: {
+          id: true,
+          documentNumber: true,
+          documentType: true,
+          status: true,
+          issueDate: true,
+          createdAt: true,
+          totalTTC: true,
+        },
+      });
+
+      await upsertLineItems(tx, {
+        companyId: auth.company.id,
+        documentId: createdDocument.id,
+        tvaRate,
+        lines: parsed.lines,
+      });
+
+      await tx.importJobResult.create({
+        data: {
+          companyId: auth.company.id,
+          importJobId: job.id,
+          extractedType: DocumentType.EXTRACT_BON_COMMANDE_PUBLIC,
+          confidenceScore: parsed.lines.length > 0 ? 90 : 0,
+          extractedJson: {
+            lineCount: parsed.lines.length,
+            sheetName: parsed.sheetName,
+            warnings: parsed.warnings,
+            preview: parsed.lines.slice(0, 80),
+          },
+          normalizedJson: {
+            documentId: createdDocument.id,
+            documentNumber: createdDocument.documentNumber,
+          },
+          warningJson: parsed.warnings,
+        },
+      });
+
+      await tx.importJob.update({
+        where: { id: job.id },
+        data: {
+          status: "COMPLETED",
+          errorMessage: null,
+        },
+      });
+
+      return createdDocument;
+    });
+
+    return {
+      ok: true as const,
+      job: {
+        id: job.id,
+        status: "COMPLETED",
+        createdAt: job.createdAt.toISOString(),
+        fileName: job.sourceFileName,
+      },
+      document: toListRow({
+        id: created.id,
+        number: created.documentNumber,
+        type: created.documentType,
+        client: importClientName,
+        status: created.status,
+        totalTTC: Number(created.totalTTC),
+        issueDate: created.issueDate || created.createdAt,
+      }),
+      preview: {
+        lineCount: parsed.lines.length,
+        warnings: parsed.warnings,
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Import parsing failed.";
+    await prisma.importJob
+      .update({
+        where: { id: job.id },
+        data: {
+          status: "FAILED",
+          errorMessage: message.slice(0, 1900),
+        },
+      })
+      .catch(() => undefined);
+
+    return {
+      ok: false as const,
+      errorCode: "PARSE_FAILED",
+      error: `Unable to parse Excel file. ${message}`,
+    };
+  }
 }
 
 export async function convertDocumentAction(input: ConvertDocumentInput) {

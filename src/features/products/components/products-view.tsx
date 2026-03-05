@@ -1,7 +1,7 @@
 "use client";
 
 import { AiSearchIcon, Cancel01Icon, Edit02Icon, EyeIcon, PackageIcon } from "@hugeicons/core-free-icons";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ActionMenu } from "@/components/ui/action-menu";
 import { FilterField } from "@/components/ui/filter-field";
@@ -10,8 +10,13 @@ import { HugIcon } from "@/components/ui/hug-icon";
 import { useMsgBox } from "@/components/ui/msg-box";
 import { useToast } from "@/components/ui/toast";
 import { UiButton } from "@/components/ui/ui-button";
-import { deleteProductAction, updateProductAction } from "@/features/products/actions";
-import { STORE_EVENTS, listDocumentUnits } from "@/features/documents/lib/workspace-store";
+import { deleteProductAction, importProductCatalogAction, updateProductAction } from "@/features/products/actions";
+import { emitWorkspaceEvent, STORE_EVENTS } from "@/features/documents/lib/workspace-store";
+import {
+  getCompanyDocumentUnitsAction,
+  getCompanyViewPreferenceAction,
+  saveCompanyViewPreferenceAction,
+} from "@/features/settings/actions";
 import { useI18n } from "@/i18n/provider";
 
 type ProductViewMode = "table" | "grid";
@@ -36,17 +41,21 @@ type ProductsViewProps = {
   products: ProductRow[];
 };
 
-const VIEW_KEY = "products-view-mode";
+const CATALOG_TEMPLATE_COLUMNS = ["sku", "name", "description", "unit", "price_ht", "vat_rate", "is_active"] as const;
+const CATALOG_TEMPLATE_SAMPLE = ["SKU-001", "Article demo", "Optional note", "u", "100.00", "20", "true"] as const;
 
 export function ProductsView({ products }: ProductsViewProps) {
-  const { success, error } = useToast();
+  const { success, error, info } = useToast();
   const { t } = useI18n();
   const { confirm } = useMsgBox();
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const [rows, setRows] = useState<ProductRow[]>(products);
-  const [units, setUnits] = useState<string[]>(() => listDocumentUnits());
+  const [units, setUnits] = useState<string[]>(["u", "kg", "m", "m2", "m3", "h", "jour", "forfait"]);
   const [query, setQuery] = useState("");
   const [vatFilter, setVatFilter] = useState("all");
   const [usageFilter, setUsageFilter] = useState("all");
+  const [catalogFile, setCatalogFile] = useState<File | null>(null);
+  const [importingCatalog, setImportingCatalog] = useState(false);
   const [viewMode, setViewMode] = useState<ProductViewMode>("table");
   const [detailsProductId, setDetailsProductId] = useState<string | null>(null);
   const [editProductId, setEditProductId] = useState<string | null>(null);
@@ -62,32 +71,110 @@ export function ProductsView({ products }: ProductsViewProps) {
   });
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      const stored = window.localStorage.getItem(VIEW_KEY);
-      if (stored === "grid") {
-        setViewMode("grid");
-      }
-    }, 0);
-    return () => window.clearTimeout(timer);
+    let mounted = true;
+    void getCompanyViewPreferenceAction("products")
+      .then((result) => {
+        if (!mounted || !result.ok) {
+          return;
+        }
+        if (result.mode === "grid" || result.mode === "table") {
+          setViewMode(result.mode);
+        }
+      })
+      .catch(() => {
+        // Keep default view mode when preference load fails.
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const syncUnits = () => {
+      void getCompanyDocumentUnitsAction().then((result) => {
+        if (!mounted || !result.ok) {
+          return;
+        }
+        setUnits(result.units);
+      });
+    };
+    syncUnits();
+    window.addEventListener(STORE_EVENTS.unitsUpdated, syncUnits);
+    return () => {
+      mounted = false;
+      window.removeEventListener(STORE_EVENTS.unitsUpdated, syncUnits);
+    };
   }, []);
 
   useEffect(() => {
     setRows(products);
   }, [products]);
 
-  useEffect(() => {
-    const syncUnits = () => {
-      setUnits(listDocumentUnits());
-    };
-    window.addEventListener(STORE_EVENTS.unitsUpdated, syncUnits);
-    return () => window.removeEventListener(STORE_EVENTS.unitsUpdated, syncUnits);
-  }, []);
-
   const setMode = (mode: ProductViewMode) => {
     setViewMode(mode);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(VIEW_KEY, mode);
+    void saveCompanyViewPreferenceAction({ scope: "products", mode }).catch(() => {
+      // Keep UI mode if DB save fails.
+    });
+  };
+
+  const resetCatalogFileInput = () => {
+    if (importFileInputRef.current) {
+      importFileInputRef.current.value = "";
     }
+    setCatalogFile(null);
+  };
+
+  const downloadCatalogTemplate = () => {
+    const csvRows = [CATALOG_TEMPLATE_COLUMNS.join(","), CATALOG_TEMPLATE_SAMPLE.join(",")];
+    const blob = new Blob([`\uFEFF${csvRows.join("\n")}`], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "catalog_template.csv";
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+    success(t("products.import.templateDownloaded"));
+  };
+
+  const importCatalog = async () => {
+    if (!catalogFile) {
+      error(t("products.import.toasts.fileRequired"));
+      return;
+    }
+
+    setImportingCatalog(true);
+    const formData = new FormData();
+    formData.set("file", catalogFile);
+    const result = await importProductCatalogAction(formData);
+    setImportingCatalog(false);
+
+    if (!result.ok) {
+      const summary = "summary" in result && result.summary
+        ? t("products.import.toasts.failedHint")
+            .replace("{valid}", String(result.summary.validRows || 0))
+            .replace("{invalid}", String(result.summary.invalidRows || 0))
+        : undefined;
+      error(t("products.import.toasts.failed"), result.error || summary);
+      return;
+    }
+
+    setRows((current) => mergeImportedRows(current, result.products));
+    emitWorkspaceEvent(STORE_EVENTS.articlesUpdated);
+    const summaryLabel = t("products.import.toasts.successHint")
+      .replace("{created}", String(result.summary.createdCount))
+      .replace("{updated}", String(result.summary.updatedCount))
+      .replace("{duplicates}", String(result.summary.duplicateRows))
+      .replace("{invalid}", String(result.summary.invalidRows))
+      .replace("{failed}", String(result.summary.failedCount));
+    success(t("products.import.toasts.success"), summaryLabel);
+    if (result.errors.length > 0) {
+      const first = result.errors[0];
+      info(t("products.import.toasts.partialIssues"), `Row ${first.rowNumber}: ${first.message}`);
+    }
+    resetCatalogFileInput();
   };
 
   const filtered = useMemo(() => {
@@ -132,7 +219,7 @@ export function ProductsView({ products }: ProductsViewProps) {
     const source = units.length ? units : ["u"];
     return source.map((unit) => ({ value: unit, label: unit }));
   }, [units]);
-
+  
   const openEditProduct = (product: ProductRow) => {
     setDetailsProductId(null);
     setEditProductId(product.id);
@@ -233,6 +320,7 @@ export function ProductsView({ products }: ProductsViewProps) {
   const renderActions = (product: ProductRow) => (
     <ActionMenu
       triggerAriaLabel={t("products.actions.openActions")}
+      menuZIndex={30}
       sections={[
         {
           id: "actions",
@@ -248,15 +336,7 @@ export function ProductsView({ products }: ProductsViewProps) {
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <SummaryCard label={t("products.summary.totalProducts")} value={String(stats.total)} />
-        <SummaryCard label={t("products.summary.catalogHtSum")} value={`${stats.catalogHT.toFixed(2)} MAD`} />
-        <SummaryCard label={t("products.summary.usedInDocuments")} value={String(stats.usedInDocs)} />
-        <SummaryCard label={t("products.summary.soldQuantity")} value={stats.soldQuantity.toFixed(3)} />
-        <SummaryCard label={t("products.summary.revenueHt")} value={`${stats.revenueHT.toFixed(2)} MAD`} />
-      </div>
-
-      <div className="space-y-3 rounded-md border border-border bg-card/70 p-4">
+      <div className="relative z-40 space-y-3 rounded-md border border-border bg-card/70 p-4">
         <div className="grid gap-3 md:grid-cols-[1fr_220px_220px_auto]">
           <FilterField
             value={query}
@@ -305,6 +385,59 @@ export function ProductsView({ products }: ProductsViewProps) {
             />
           </div>
         </div>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+        <SummaryCard label={t("products.summary.totalProducts")} value={String(stats.total)} />
+        <SummaryCard label={t("products.summary.catalogHtSum")} value={`${stats.catalogHT.toFixed(2)} MAD`} />
+        <SummaryCard label={t("products.summary.usedInDocuments")} value={String(stats.usedInDocs)} />
+        <SummaryCard label={t("products.summary.soldQuantity")} value={stats.soldQuantity.toFixed(3)} />
+        <SummaryCard label={t("products.summary.revenueHt")} value={`${stats.revenueHT.toFixed(2)} MAD`} />
+      </div>
+
+      <div className="rounded-md border border-border bg-card/70 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-1">
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">{t("products.import.title")}</p>
+            <p className="text-xs text-muted-foreground">{t("products.import.subtitle")}</p>
+            <p className="text-[11px] text-muted-foreground">{t("products.import.columns")}: {CATALOG_TEMPLATE_COLUMNS.join(", ")}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <UiButton type="button" size="sm" variant="outline" iconName="export" onClick={downloadCatalogTemplate}>
+              {t("products.import.downloadTemplate")}
+            </UiButton>
+            <UiButton
+              type="button"
+              size="sm"
+              variant="outline"
+              iconName="import"
+              onClick={() => importFileInputRef.current?.click()}
+            >
+              {catalogFile ? t("products.import.replaceFile") : t("products.import.selectFile")}
+            </UiButton>
+            <UiButton
+              type="button"
+              size="sm"
+              variant="primary"
+              onClick={() => void importCatalog()}
+              disabled={!catalogFile || importingCatalog}
+            >
+              {importingCatalog ? t("products.import.importing") : t("products.import.importNow")}
+            </UiButton>
+          </div>
+        </div>
+        <input
+          ref={importFileInputRef}
+          type="file"
+          accept=".csv,.xls,.xlsx"
+          className="hidden"
+          onChange={(event) => setCatalogFile(event.target.files?.[0] ?? null)}
+        />
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          {catalogFile
+            ? t("products.import.selectedFile").replace("{name}", catalogFile.name)
+            : t("products.import.acceptedFormats")}
+        </p>
       </div>
 
       {viewMode === "table" ? (
@@ -478,6 +611,42 @@ export function ProductsView({ products }: ProductsViewProps) {
       ) : null}
     </div>
   );
+}
+
+function mergeImportedRows(
+  currentRows: ProductRow[],
+  importedRows: Array<{
+    id: string;
+    sku: string | null;
+    name: string;
+    description: string | null;
+    unit: string;
+    priceHT: number;
+    vatRate: number;
+    isActive: boolean;
+    updatedAt: string;
+  }>,
+) {
+  const byId = new Map(currentRows.map((row) => [row.id, row]));
+  for (const imported of importedRows) {
+    const existing = byId.get(imported.id);
+    byId.set(imported.id, {
+      id: imported.id,
+      sku: imported.sku,
+      name: imported.name,
+      description: imported.description,
+      unit: imported.unit,
+      priceHT: imported.priceHT,
+      vatRate: imported.vatRate,
+      isActive: imported.isActive,
+      updatedAt: imported.updatedAt,
+      documentsCount: existing?.documentsCount || 0,
+      lineItemsCount: existing?.lineItemsCount || 0,
+      soldQuantity: existing?.soldQuantity || 0,
+      revenueHT: existing?.revenueHT || 0,
+    });
+  }
+  return Array.from(byId.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 function SummaryCard({ label, value }: { label: string; value: string }) {

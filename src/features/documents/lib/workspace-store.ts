@@ -11,6 +11,13 @@ export const DOCUMENT_TYPE_OPTIONS = [
   "EXTRACT_DEVIS",
   "EXTRACT_BON_COMMANDE_PUBLIC",
 ] as const;
+export const MANUAL_DOCUMENT_TYPE_OPTIONS = [
+  "DEVIS",
+  "FACTURE",
+  "FACTURE_PROFORMA",
+  "BON_LIVRAISON",
+  "BON_COMMANDE",
+] as const;
 export const DOCUMENT_STATUS_OPTIONS = [
   "DRAFT",
   "ISSUED",
@@ -128,6 +135,7 @@ export type UnitSettings = string[];
 
 export const STORE_EVENTS = {
   documentsUpdated: "doc-v1-documents-updated",
+  documentEditorRequested: "doc-v1-document-editor-requested",
   clientsUpdated: "doc-v1-clients-updated",
   articlesUpdated: "doc-v1-articles-updated",
   templateColumnsUpdated: "doc-v1-template-columns-updated",
@@ -157,6 +165,7 @@ const UNITS_KEY = "units";
 type BusinessConfig = {
   enabledDocumentTypes: DocumentType[];
   defaultTvaRate: number;
+  autoFillArticleUnitPrice: boolean;
 };
 
 const DEFAULT_LINE_COLUMNS: TemplateLineColumn[] = [
@@ -167,8 +176,9 @@ const DEFAULT_LINE_COLUMNS: TemplateLineColumn[] = [
   { id: "pt", label: "P.T HT", dataType: "currency", required: false, enabled: true, system: true },
 ];
 const DEFAULT_BUSINESS_CONFIG: BusinessConfig = {
-  enabledDocumentTypes: [...DOCUMENT_TYPE_OPTIONS],
+  enabledDocumentTypes: [...MANUAL_DOCUMENT_TYPE_OPTIONS],
   defaultTvaRate: 20,
+  autoFillArticleUnitPrice: true,
 };
 const DEFAULT_GENERAL_INFO: GeneralInfoSettings = {
   legalName: "",
@@ -336,11 +346,11 @@ function sanitizeTvaRate(rate: number) {
 
 function sanitizeDocumentTypes(input: unknown): DocumentType[] {
   if (!Array.isArray(input)) {
-    return [...DOCUMENT_TYPE_OPTIONS];
+    return [...MANUAL_DOCUMENT_TYPE_OPTIONS];
   }
-  const values = input.filter((item): item is DocumentType => DOCUMENT_TYPE_OPTIONS.includes(item as DocumentType));
+  const values = input.filter((item): item is DocumentType => MANUAL_DOCUMENT_TYPE_OPTIONS.includes(item as DocumentType));
   if (values.length === 0) {
-    return [...DOCUMENT_TYPE_OPTIONS];
+    return [...MANUAL_DOCUMENT_TYPE_OPTIONS];
   }
   return [...new Set(values)];
 }
@@ -402,11 +412,26 @@ export function emitWorkspaceEvent(eventName: (typeof STORE_EVENTS)[keyof typeof
   window.dispatchEvent(new Event(eventName));
 }
 
+export function requestDocumentEditorOpen(documentId: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const clean = documentId.trim();
+  if (!clean) {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent(STORE_EVENTS.documentEditorRequested, { detail: { documentId: clean } }));
+}
+
 export function getBusinessConfig(): BusinessConfig {
   const raw = readJson<Partial<BusinessConfig>>(BUSINESS_CONFIG_KEY, DEFAULT_BUSINESS_CONFIG);
   return {
     enabledDocumentTypes: sanitizeDocumentTypes(raw.enabledDocumentTypes),
     defaultTvaRate: sanitizeTvaRate(parseNumber(raw.defaultTvaRate, DEFAULT_BUSINESS_CONFIG.defaultTvaRate)),
+    autoFillArticleUnitPrice:
+      typeof raw.autoFillArticleUnitPrice === "boolean"
+        ? raw.autoFillArticleUnitPrice
+        : DEFAULT_BUSINESS_CONFIG.autoFillArticleUnitPrice,
   };
 }
 
@@ -415,6 +440,10 @@ export function saveBusinessConfig(config: Partial<BusinessConfig>) {
   const next: BusinessConfig = {
     enabledDocumentTypes: sanitizeDocumentTypes(config.enabledDocumentTypes ?? current.enabledDocumentTypes),
     defaultTvaRate: sanitizeTvaRate(parseNumber(config.defaultTvaRate ?? current.defaultTvaRate, current.defaultTvaRate)),
+    autoFillArticleUnitPrice:
+      typeof config.autoFillArticleUnitPrice === "boolean"
+        ? config.autoFillArticleUnitPrice
+        : current.autoFillArticleUnitPrice,
   };
   writeJson(BUSINESS_CONFIG_KEY, next);
   emitWorkspaceEvent(STORE_EVENTS.businessConfigUpdated);

@@ -1,7 +1,7 @@
 "use server";
 
-import { DocumentStatus, ExportFormat, type DocumentType, TemplateFormat } from "@prisma/client";
-import { mkdir, unlink, writeFile } from "fs/promises";
+import { DocumentStatus, DocumentType, ExportFormat, TemplateFormat } from "@prisma/client";
+import { mkdir, readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
 
 import { requireAuthContext } from "@/features/auth/lib/session";
@@ -9,6 +9,9 @@ import { prisma } from "@/lib/db";
 
 const MAX_TEMPLATE_FILE_SIZE = 8 * 1024 * 1024;
 const STORAGE_ROOT = path.resolve(process.cwd(), "..", "storage");
+const IMPORTS_ROOT = path.resolve(STORAGE_ROOT, "document-imports");
+const TEMPLATE_COLUMNS_KEY_PREFIX = "template-columns:";
+const DEFAULT_TEMPLATE_COLUMN_IDS = ["designation", "unite", "qte", "pu", "pt"] as const;
 const DOCUMENT_ENGINE_URL = (process.env.DOCUMENT_ENGINE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 const DOCUMENT_ENGINE_TOKEN = (process.env.DOCUMENT_ENGINE_TOKEN || "").trim();
 const ALLOWED_EXTENSIONS: Record<string, TemplateFormat> = {
@@ -101,6 +104,126 @@ function readText(input: unknown) {
 function toNumeric(input: unknown) {
   const parsed = Number(input);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function readTemplateColumnIds(input: unknown) {
+  const output: string[] = [];
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        continue;
+      }
+      const source = item as Record<string, unknown>;
+      const id = typeof source.id === "string" ? source.id.trim() : "";
+      const enabled = source.enabled !== false;
+      if (!id || !enabled) {
+        continue;
+      }
+      output.push(id);
+    }
+  }
+
+  for (const id of DEFAULT_TEMPLATE_COLUMN_IDS) {
+    if (!output.includes(id)) {
+      output.push(id);
+    }
+  }
+
+  return output;
+}
+
+function normalizeImportCellText(value: unknown) {
+  if (value == null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value.replace(/\u00A0/g, " ").trim();
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? String(value) : "";
+  }
+  return String(value).trim();
+}
+
+function normalizeImportSearchText(input: string) {
+  return input
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseImportNumber(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  const text = normalizeImportCellText(value);
+  if (!text) {
+    return null;
+  }
+  const normalized = text
+    .replace(/\u00A0/g, "")
+    .replace(/\s+/g, "")
+    .replace(/,/g, ".")
+    .replace(/[^0-9.-]/g, "");
+  if (!normalized || normalized === "." || normalized === "-" || normalized === "-.") {
+    return null;
+  }
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function includesImportKeyword(input: string, keywords: string[]) {
+  const haystack = normalizeImportSearchText(input);
+  return keywords.some((keyword) => haystack.includes(normalizeImportSearchText(keyword)));
+}
+
+function detectImportSheetColumns(rows: string[][]) {
+  const designationKeywords = ["designation", "designation des ouvrages", "ouvrage", "ouvrages", "article", "description", "objet", "libelle", "item"];
+  const unitKeywords = ["unite", "unit"];
+  const qtyKeywords = ["qte", "quantite", "quantity", "qty"];
+  const unitPriceKeywords = ["prix unitaire", "p.u", "pu", "unit price"];
+  const totalKeywords = ["pt", "prix total", "total ht", "montant"];
+
+  for (let rowIndex = 0; rowIndex < Math.min(rows.length, 40); rowIndex += 1) {
+    const row = rows[rowIndex];
+    const designation = row.findIndex((cell) => includesImportKeyword(cell, designationKeywords));
+    const qty = row.findIndex((cell) => includesImportKeyword(cell, qtyKeywords));
+    const unit = row.findIndex((cell) => includesImportKeyword(cell, unitKeywords));
+    const unitPrice = row.findIndex((cell) => includesImportKeyword(cell, unitPriceKeywords));
+    const total = row.findIndex((cell) => includesImportKeyword(cell, totalKeywords));
+
+    if (designation >= 0 && (qty >= 0 || unit >= 0 || unitPrice >= 0 || total >= 0)) {
+      return {
+        startRow: rowIndex + 1,
+        designation,
+        unit,
+        qty,
+        unitPrice,
+        total,
+      };
+    }
+  }
+
+  return {
+    startRow: 0,
+    designation: 0,
+    unit: -1,
+    qty: -1,
+    unitPrice: -1,
+    total: -1,
+  };
+}
+
+function readImportRowIndex(snapshotJson: unknown) {
+  const snapshot = parseJsonRecord(snapshotJson);
+  const rowRaw = readText(snapshot.import_row);
+  const parsed = Number(rowRaw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.floor(parsed);
 }
 
 function toDateLabel(value: Date | null | undefined) {
@@ -251,6 +374,45 @@ function extensionByExportFormat(format: ExportFormat) {
     return ".xlsx";
   }
   return ".pdf";
+}
+
+function canUseDirectXlsxFallback(documentType: DocumentType, format: ExportFormat) {
+  if (format !== ExportFormat.XLSX) {
+    return false;
+  }
+  return (
+    documentType === DocumentType.EXTRACT_BON_COMMANDE_PUBLIC ||
+    documentType === DocumentType.EXTRACT_DEVIS
+  );
+}
+
+function sanitizeSheetName(value: string) {
+  const cleaned = value
+    .replace(/[\\/?*\[\]:]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) {
+    return "Document";
+  }
+  return cleaned.slice(0, 31);
+}
+
+async function saveExportOutputFile(input: {
+  companyId: string;
+  preferredName: string;
+  bytes: Buffer;
+}) {
+  const finalFileName = `${Date.now()}_${sanitizeFileName(input.preferredName)}`;
+  const outputRelativePath = path.join("document-outputs", input.companyId, finalFileName);
+  const outputAbsolutePath = toAbsoluteStoragePath(outputRelativePath);
+
+  await mkdir(path.dirname(outputAbsolutePath), { recursive: true });
+  await writeFile(outputAbsolutePath, input.bytes);
+
+  return {
+    finalFileName,
+    outputRelativePath,
+  };
 }
 
 function extractFilenameFromDisposition(headerValue: string | null) {
@@ -714,6 +876,19 @@ async function buildDocumentExportPayload(companyId: string, documentId: string)
     throw new Error("Document not found.");
   }
 
+  const templateColumnsSetting = await prisma.companySetting.findUnique({
+    where: {
+      companyId_key: {
+        companyId,
+        key: `${TEMPLATE_COLUMNS_KEY_PREFIX}${document.documentType}`,
+      },
+    },
+    select: {
+      valueJson: true,
+    },
+  });
+  const configuredLineColumnIds = readTemplateColumnIds(templateColumnsSetting?.valueJson);
+
   const metadata = parseJsonRecord(document.metadataJson);
   const clientSnapshot = parseJsonRecord(metadata.clientSnapshot);
   const profile = document.company.profile;
@@ -735,6 +910,11 @@ async function buildDocumentExportPayload(companyId: string, documentId: string)
       }
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
         merged[key] = value;
+      }
+    }
+    for (const columnId of configuredLineColumnIds) {
+      if (!(columnId in merged)) {
+        merged[columnId] = "";
       }
     }
 
@@ -761,15 +941,23 @@ async function buildDocumentExportPayload(companyId: string, documentId: string)
     };
   });
 
-  const lineSample = lines[0] || {
-    designation: "",
-    unit: "",
-    quantity: 0,
-    unit_price_ht: 0,
-    total_ht: 0,
-    total_ttc: 0,
-    vat_rate: tvaRate,
-  };
+  const lineSample = lines[0] || (() => {
+    const defaults: Record<string, unknown> = {
+      designation: "",
+      unit: "",
+      quantity: 0,
+      unit_price_ht: 0,
+      total_ht: 0,
+      total_ttc: 0,
+      vat_rate: tvaRate,
+    };
+    for (const columnId of configuredLineColumnIds) {
+      if (!(columnId in defaults)) {
+        defaults[columnId] = "";
+      }
+    }
+    return defaults;
+  })();
 
   const payloadBase: Record<string, unknown> = {
     company: {
@@ -875,6 +1063,290 @@ async function buildDocumentExportPayload(companyId: string, documentId: string)
   };
 }
 
+async function buildDirectXlsxFromImportedSource(input: {
+  companyId: string;
+  documentId: string;
+}) {
+  const sourceDocument = await prisma.document.findFirst({
+    where: {
+      id: input.documentId,
+      companyId: input.companyId,
+    },
+    select: {
+      documentNumber: true,
+      metadataJson: true,
+      lineItems: {
+        orderBy: { sortOrder: "asc" },
+        select: {
+          quantity: true,
+          unitPriceHT: true,
+          lineSubtotalHT: true,
+          snapshotJson: true,
+        },
+      },
+    },
+  });
+
+  if (!sourceDocument) {
+    return null;
+  }
+
+  const metadata = parseJsonRecord(sourceDocument.metadataJson);
+  const importSource = parseJsonRecord(metadata.importSource);
+  const importJobId = readText(importSource.importJobId).trim();
+  const sourceSheetName = readText(importSource.sheetName).trim();
+  if (!importJobId) {
+    return null;
+  }
+
+  const importJob = await prisma.importJob.findFirst({
+    where: {
+      id: importJobId,
+      companyId: input.companyId,
+    },
+    select: {
+      sourceFileName: true,
+      sourceFilePath: true,
+    },
+  });
+
+  if (!importJob?.sourceFilePath) {
+    return null;
+  }
+
+  const absoluteSourcePath = toAbsoluteStoragePath(importJob.sourceFilePath);
+  if (!absoluteSourcePath.startsWith(IMPORTS_ROOT)) {
+    return null;
+  }
+
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(absoluteSourcePath);
+  } catch {
+    return null;
+  }
+
+  const XLSX = await import("xlsx");
+  const workbook = XLSX.read(bytes, { type: "buffer", cellDates: false });
+  const sheetName =
+    (sourceSheetName && workbook.Sheets[sourceSheetName] ? sourceSheetName : "") ||
+    workbook.SheetNames[0] ||
+    "Sheet1";
+  if (!workbook.Sheets[sheetName]) {
+    return null;
+  }
+
+  const worksheet = workbook.Sheets[sheetName];
+  const rawRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "", raw: true }) as unknown[][];
+  const textRows = rawRows.map((row) => row.map((cell) => normalizeImportCellText(cell)));
+  const columns = detectImportSheetColumns(textRows);
+
+  const lineItemsByRow = new Map<number, { quantity: number; unitPriceHT: number; lineSubtotalHT: number }>();
+  for (const line of sourceDocument.lineItems) {
+    const rowIndex1Based = readImportRowIndex(line.snapshotJson);
+    if (!rowIndex1Based) {
+      continue;
+    }
+    lineItemsByRow.set(rowIndex1Based - 1, {
+      quantity: toNumeric(line.quantity),
+      unitPriceHT: toNumeric(line.unitPriceHT),
+      lineSubtotalHT: toNumeric(line.lineSubtotalHT),
+    });
+  }
+
+  if (!lineItemsByRow.size) {
+    return null;
+  }
+
+  const cellUpdates: Array<{ row: number; column: number; value: number }> = [];
+  for (const [rowIndex, values] of lineItemsByRow.entries()) {
+    if (columns.qty >= 0) {
+      rawRows[rowIndex] = rawRows[rowIndex] || [];
+      rawRows[rowIndex][columns.qty] = values.quantity;
+      cellUpdates.push({
+        row: rowIndex + 1,
+        column: columns.qty + 1,
+        value: values.quantity,
+      });
+    }
+    if (columns.unitPrice >= 0) {
+      rawRows[rowIndex] = rawRows[rowIndex] || [];
+      rawRows[rowIndex][columns.unitPrice] = values.unitPriceHT;
+      cellUpdates.push({
+        row: rowIndex + 1,
+        column: columns.unitPrice + 1,
+        value: values.unitPriceHT,
+      });
+    }
+    if (columns.total >= 0) {
+      rawRows[rowIndex] = rawRows[rowIndex] || [];
+      rawRows[rowIndex][columns.total] = values.lineSubtotalHT;
+      cellUpdates.push({
+        row: rowIndex + 1,
+        column: columns.total + 1,
+        value: values.lineSubtotalHT,
+      });
+    }
+  }
+
+  if (columns.designation >= 0 && columns.total >= 0) {
+    let subtotalAccumulator = 0;
+    let grandTotalAccumulator = 0;
+
+    for (let rowIndex = columns.startRow; rowIndex < rawRows.length; rowIndex += 1) {
+      const row = rawRows[rowIndex] || [];
+      const designation = normalizeImportCellText(row[columns.designation]);
+      if (!designation) {
+        continue;
+      }
+
+      const normalizedDesignation = normalizeImportSearchText(designation);
+      const quantity = columns.qty >= 0 ? parseImportNumber(row[columns.qty]) : null;
+      const unitPrice = columns.unitPrice >= 0 ? parseImportNumber(row[columns.unitPrice]) : null;
+      const lineTotal = parseImportNumber(row[columns.total]);
+
+      const hasQty = quantity != null && quantity > 0;
+      const hasUnitPrice = unitPrice != null && unitPrice > 0;
+      const hasTotal = lineTotal != null && lineTotal > 0;
+      const isSubtotalLabel = includesImportKeyword(normalizedDesignation, ["sous total", "subtotal", "total"]);
+      const isSubtotalRow = isSubtotalLabel && !hasQty && !hasUnitPrice;
+      const isCategoryRow = !isSubtotalRow && !hasQty && !hasUnitPrice && !hasTotal;
+
+      if (isSubtotalRow) {
+        const isGrandTotalRow = includesImportKeyword(normalizedDesignation, ["general", "global", "général", "totaux"]);
+        const subtotalValue = isGrandTotalRow ? grandTotalAccumulator : subtotalAccumulator;
+        rawRows[rowIndex][columns.total] = subtotalValue;
+        cellUpdates.push({
+          row: rowIndex + 1,
+          column: columns.total + 1,
+          value: subtotalValue,
+        });
+        if (!isGrandTotalRow) {
+          subtotalAccumulator = 0;
+        }
+        continue;
+      }
+
+      if (isCategoryRow) {
+        continue;
+      }
+
+      const effectiveLineTotal = parseImportNumber(rawRows[rowIndex]?.[columns.total]) || 0;
+      subtotalAccumulator += effectiveLineTotal;
+      grandTotalAccumulator += effectiveLineTotal;
+    }
+  }
+
+  const sourceNameBase = path.parse(importJob.sourceFileName || sourceDocument.documentNumber).name;
+  const preferredName = `${sanitizeFileName(sourceNameBase || sourceDocument.documentNumber)}.xlsx`;
+
+  if (!cellUpdates.length) {
+    return null;
+  }
+
+  const enginePayload = {
+    __xlsx_import_patch__: {
+      sheet_name: sheetName,
+      cell_updates: cellUpdates,
+    },
+  };
+  const body = new FormData();
+  body.set("data", JSON.stringify(enginePayload));
+  body.set("output_name", preferredName);
+  body.set("output_format", "xlsx");
+  body.set(
+    "file",
+    new Blob([bytes], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }),
+    importJob.sourceFileName || preferredName,
+  );
+
+  const headers: HeadersInit = {};
+  if (DOCUMENT_ENGINE_TOKEN) {
+    headers.Authorization = `Bearer ${DOCUMENT_ENGINE_TOKEN}`;
+  }
+  const response = await fetch(`${DOCUMENT_ENGINE_URL}/generate`, {
+    method: "POST",
+    body,
+    headers,
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const raw = await response.text();
+    let message = raw || `Document engine error (${response.status})`;
+    try {
+      const parsed = JSON.parse(raw) as { detail?: string };
+      if (parsed.detail) {
+        message = parsed.detail;
+      }
+    } catch {
+      // Keep raw response message.
+    }
+    throw new Error(message);
+  }
+  const outputBytes = Buffer.from(await response.arrayBuffer());
+
+  return {
+    bytes: outputBytes,
+    preferredName,
+  };
+}
+
+async function buildDirectXlsxExportWithoutTemplate(input: {
+  companyId: string;
+  documentId: string;
+}) {
+  const fromSource = await buildDirectXlsxFromImportedSource(input);
+  if (fromSource) {
+    return fromSource;
+  }
+
+  const XLSX = await import("xlsx");
+  const { payload, documentNumber } = await buildDocumentExportPayload(input.companyId, input.documentId);
+  const payloadRecord = parseJsonRecord(payload);
+  const linesRaw = Array.isArray(payloadRecord.lines) ? payloadRecord.lines : [];
+  const totals = parseJsonRecord(payloadRecord.totals);
+
+  const rows: Array<Array<string | number>> = [
+    ["No", "Designation", "Unit", "Qty", "Unit price HT", "Total HT", "VAT %", "Total TTC", "Category"],
+  ];
+
+  for (let index = 0; index < linesRaw.length; index += 1) {
+    const line = parseJsonRecord(linesRaw[index]);
+    rows.push([
+      index + 1,
+      readText(line.designation),
+      readText(line.unit),
+      toNumeric(line.quantity),
+      toNumeric(line.unit_price_ht),
+      toNumeric(line.total_ht),
+      toNumeric(line.vat_rate),
+      toNumeric(line.total_ttc),
+      readText(line.import_category),
+    ]);
+  }
+
+  rows.push([]);
+  rows.push(["", "", "", "", "Subtotal HT", toNumeric(totals.subtotal_ht), "", "", ""]);
+  rows.push(["", "", "", "", "Total tax", toNumeric(totals.total_tax), "", "", ""]);
+  rows.push(["", "", "", "", "Total TTC", toNumeric(totals.total_ttc), "", "", ""]);
+
+  const sheet = XLSX.utils.aoa_to_sheet(rows);
+  sheet["!cols"] = [{ wch: 6 }, { wch: 50 }, { wch: 10 }, { wch: 12 }, { wch: 16 }, { wch: 16 }, { wch: 10 }, { wch: 16 }, { wch: 24 }];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, sheet, sanitizeSheetName(documentNumber));
+
+  const rawBytes = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  const bytes = Buffer.isBuffer(rawBytes) ? rawBytes : Buffer.from(rawBytes);
+  const preferredName = `${sanitizeFileName(documentNumber)}.xlsx`;
+
+  return {
+    bytes,
+    preferredName,
+  };
+}
+
 export async function generateDocumentExportAction(input: QueueDocumentExportInput) {
   const auth = await requireAuthContext();
   const documentId = input.documentId.trim();
@@ -910,6 +1382,7 @@ export async function generateDocumentExportAction(input: QueueDocumentExportInp
   }
 
   const targetTemplateFormat = templateFormatByExportFormat(input.exportFormat);
+  const allowDirectXlsxFallback = canUseDirectXlsxFallback(document.documentType, input.exportFormat);
 
   const template = input.templateId
     ? await prisma.template.findFirst({
@@ -952,11 +1425,82 @@ export async function generateDocumentExportAction(input: QueueDocumentExportInp
         },
       });
 
-  if (!template) {
+  if (!template && !allowDirectXlsxFallback) {
     return {
       ok: false as const,
       error: `No active ${targetTemplateFormat} template is available for this document type.`,
     };
+  }
+
+  if (!template && allowDirectXlsxFallback) {
+    const startedAt = new Date();
+    const job = await prisma.exportJob.create({
+      data: {
+        companyId: auth.company.id,
+        documentId: document.id,
+        templateId: null,
+        templateVersionId: null,
+        exportFormat: input.exportFormat,
+        status: "RUNNING",
+        startedAt,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    try {
+      const { bytes, preferredName } = await buildDirectXlsxExportWithoutTemplate({
+        companyId: auth.company.id,
+        documentId: document.id,
+      });
+      const saved = await saveExportOutputFile({
+        companyId: auth.company.id,
+        preferredName,
+        bytes,
+      });
+
+      await prisma.exportJob.update({
+        where: { id: job.id },
+        data: {
+          status: "COMPLETED",
+          outputPath: saved.outputRelativePath,
+          errorMessage: null,
+          completedAt: new Date(),
+        },
+      });
+
+      await markDocumentAsExported({
+        companyId: auth.company.id,
+        actorId: auth.user.id,
+        documentId: document.id,
+      });
+
+      return {
+        ok: true as const,
+        job: {
+          id: job.id,
+          format: input.exportFormat,
+          status: "COMPLETED",
+        },
+        fileName: saved.finalFileName,
+        downloadPath: `/api/exports/${job.id}/download`,
+      };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Unable to generate export.";
+      await prisma.exportJob
+        .update({
+          where: { id: job.id },
+          data: {
+            status: "FAILED",
+            errorMessage: message.slice(0, 1900),
+            completedAt: new Date(),
+          },
+        })
+        .catch(() => undefined);
+
+      return { ok: false as const, error: message };
+    }
   }
 
   const selectedVersion = template.versions[0];
@@ -1025,19 +1569,18 @@ export async function generateDocumentExportAction(input: QueueDocumentExportInp
 
     const contentDisposition = response.headers.get("content-disposition");
     const engineFileName = extractFilenameFromDisposition(contentDisposition) || preferredName;
-    const finalFileName = `${Date.now()}_${sanitizeFileName(engineFileName)}`;
-    const outputRelativePath = path.join("document-outputs", auth.company.id, finalFileName);
-    const outputAbsolutePath = toAbsoluteStoragePath(outputRelativePath);
     const bytes = Buffer.from(await response.arrayBuffer());
-
-    await mkdir(path.dirname(outputAbsolutePath), { recursive: true });
-    await writeFile(outputAbsolutePath, bytes);
+    const saved = await saveExportOutputFile({
+      companyId: auth.company.id,
+      preferredName: engineFileName,
+      bytes,
+    });
 
     await prisma.exportJob.update({
       where: { id: job.id },
       data: {
         status: "COMPLETED",
-        outputPath: outputRelativePath,
+        outputPath: saved.outputRelativePath,
         errorMessage: null,
         completedAt: new Date(),
       },
@@ -1056,7 +1599,7 @@ export async function generateDocumentExportAction(input: QueueDocumentExportInp
         format: input.exportFormat,
         status: "COMPLETED",
       },
-      fileName: finalFileName,
+      fileName: saved.finalFileName,
       downloadPath: `/api/exports/${job.id}/download`,
     };
   } catch (e) {

@@ -64,10 +64,18 @@ export type NotificationFeedItem = {
   type: NotificationType;
   title: string;
   body: string;
+  metadata: Record<string, unknown> | null;
   actionPath: string | null;
   createdAt: string;
   isRead: boolean;
 };
+
+function parseMetadata(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
 
 export async function getCompanyNotificationConfig(companyId: string): Promise<NotificationConfigInput> {
   const row = await prisma.companySetting.findUnique({
@@ -326,6 +334,7 @@ export async function listNotificationsForUser(input: {
     type: event.notificationType,
     title: event.title || "Notification",
     body: event.body || "",
+    metadata: parseMetadata(event.metadataJson),
     actionPath: event.actionPath || null,
     createdAt: event.createdAt.toISOString(),
     isRead: event.reads.length > 0,

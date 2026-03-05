@@ -8,8 +8,9 @@ import { HugIcon } from "@/components/ui/hug-icon";
 import { useToast } from "@/components/ui/toast";
 import { UiButton } from "@/components/ui/ui-button";
 import { generateDocumentExportAction, listTemplateAssetsAction, type TemplateAssetRow } from "@/features/templates/actions";
-import { emitWorkspaceEvent, getExportSettings, STORE_EVENTS } from "@/features/documents/lib/workspace-store";
+import { emitWorkspaceEvent, ExportSettings, STORE_EVENTS } from "@/features/documents/lib/workspace-store";
 import { DOCUMENT_TYPE_OPTIONS } from "@/features/documents/lib/workspace-store";
+import { getCompanyExportSettingsAction } from "@/features/settings/actions";
 import { useI18n } from "@/i18n/provider";
 
 type DocumentType = (typeof DOCUMENT_TYPE_OPTIONS)[number];
@@ -51,42 +52,65 @@ function toTemplateFormat(value: ExportFormat) {
   return "DOCX";
 }
 
+function canDirectTemplatelessExport(documentType: DocumentType, format: ExportFormat) {
+  if (format !== "XLSX") {
+    return false;
+  }
+  return documentType === "EXTRACT_BON_COMMANDE_PUBLIC" || documentType === "EXTRACT_DEVIS";
+}
+
 export function ExportDocumentModal({ open, onOpenChange, document }: ExportDocumentModalProps) {
   const { t } = useI18n();
   const { success, error, info } = useToast();
   const [submitting, setSubmitting] = useState(false);
   const [templates, setTemplates] = useState<TemplateAssetRow[]>([]);
+  const [exportSettings, setExportSettings] = useState<ExportSettings>({
+    enabledFormats: ["PDF", "DOCX", "XLSX"],
+    defaultFormat: "PDF",
+    outputFolder: "exports",
+    includeAttachments: false,
+  });
   const [format, setFormat] = useState<ExportFormat>("PDF");
   const [templateId, setTemplateId] = useState<string>("");
 
   const formatOptions = useMemo(() => {
-    const settings = getExportSettings();
-    const enabled = settings.enabledFormats.length ? settings.enabledFormats : ["PDF", "DOCX", "XLSX"];
+    const enabled = exportSettings.enabledFormats.length ? exportSettings.enabledFormats : ["PDF", "DOCX", "XLSX"];
     return enabled.map((item) => ({
       value: item,
       label: item,
     }));
-  }, []);
+  }, [exportSettings.enabledFormats]);
 
   useEffect(() => {
     if (!open || !document) {
       return;
     }
-    const settings = getExportSettings();
-    const defaultFormat = settings.defaultFormat;
-    void listTemplateAssetsAction({ documentType: document.type })
-      .then((result) => {
-        if (!result.ok) {
-          error(t("documents.exportModal.toasts.loadTemplatesFailed"), result.error);
+    void Promise.all([
+      getCompanyExportSettingsAction(),
+      listTemplateAssetsAction({ documentType: document.type }),
+    ])
+      .then(([settingsResult, templatesResult]) => {
+        const nextSettings = settingsResult.ok
+          ? settingsResult.settings as ExportSettings
+          : {
+              enabledFormats: ["PDF", "DOCX", "XLSX"],
+              defaultFormat: "PDF" as const,
+              outputFolder: "exports",
+              includeAttachments: false,
+            };
+        setExportSettings(nextSettings);
+        const defaultFormat = nextSettings.defaultFormat as ExportFormat;
+        if (!templatesResult.ok) {
+          error(t("documents.exportModal.toasts.loadTemplatesFailed"), templatesResult.error);
           setTemplates([]);
-          setFormat(defaultFormat as ExportFormat);
+          setFormat(defaultFormat);
           setTemplateId("");
           return;
         }
-        const rows = result.rows.filter((item) => item.isActive);
+        const rows = templatesResult.rows.filter((item) => item.isActive);
         setTemplates(rows);
-        setFormat(defaultFormat as ExportFormat);
-        const targetFormat = toTemplateFormat(defaultFormat as ExportFormat);
+        setFormat(defaultFormat);
+        const targetFormat = toTemplateFormat(defaultFormat);
         const defaultByFormat = rows.find((item) => item.isDefault && item.format === targetFormat);
         const firstByFormat = rows.find((item) => item.format === targetFormat);
         const fallback = defaultByFormat || firstByFormat || rows.find((item) => item.isDefault) || rows[0];
@@ -119,11 +143,12 @@ export function ExportDocumentModal({ open, onOpenChange, document }: ExportDocu
   }
 
   const submitExport = async () => {
-    if (!matchingTemplates.length) {
+    const canExportWithoutTemplate = canDirectTemplatelessExport(document.type, format);
+    if (!matchingTemplates.length && !canExportWithoutTemplate) {
       error(t("documents.exportModal.toasts.queueFailed"), t("documents.exportModal.noTemplateHint"));
       return;
     }
-    const selectedTemplateId = effectiveTemplateId || "";
+    const selectedTemplateId = matchingTemplates.length ? effectiveTemplateId || "" : "";
     setSubmitting(true);
     const result = await generateDocumentExportAction({
       documentId: document.id,
@@ -153,6 +178,11 @@ export function ExportDocumentModal({ open, onOpenChange, document }: ExportDocu
   };
 
   const documentTypeLabel = t(DOCUMENT_TYPE_I18N_KEYS[document.type] || "documents.types.devis");
+  const canExportWithoutTemplate = canDirectTemplatelessExport(document.type, format);
+  const templateHintKey =
+    !matchingTemplates.length && canExportWithoutTemplate
+      ? "documents.exportModal.noTemplateDirectImportHint"
+      : "documents.exportModal.noTemplateHint";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
@@ -209,12 +239,12 @@ export function ExportDocumentModal({ open, onOpenChange, document }: ExportDocu
                     value: item.id,
                     label: `${item.name}${item.isDefault ? ` (${t("documents.exportModal.defaultTemplate")})` : ""}`,
                   }))
-                : [{ value: "", label: t("documents.exportModal.noTemplate") }]
+                : [{ value: "", label: canExportWithoutTemplate ? t("documents.exportModal.templateNotRequired") : t("documents.exportModal.noTemplate") }]
             }
           />
 
           {!matchingTemplates.length ? (
-            <p className="text-xs text-muted-foreground">{t("documents.exportModal.noTemplateHint")}</p>
+            <p className="text-xs text-muted-foreground">{t(templateHintKey)}</p>
           ) : null}
         </div>
 
@@ -222,7 +252,13 @@ export function ExportDocumentModal({ open, onOpenChange, document }: ExportDocu
           <UiButton type="button" size="sm" variant="ghost" onClick={() => onOpenChange(false)}>
             {t("common.cancel")}
           </UiButton>
-          <UiButton type="button" size="sm" variant="primary" disabled={submitting || !matchingTemplates.length} onClick={() => void submitExport()}>
+          <UiButton
+            type="button"
+            size="sm"
+            variant="primary"
+            disabled={submitting || (!matchingTemplates.length && !canExportWithoutTemplate)}
+            onClick={() => void submitExport()}
+          >
             {t("documents.exportModal.exportNow")}
           </UiButton>
         </div>

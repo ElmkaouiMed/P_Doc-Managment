@@ -5,6 +5,7 @@ import { useRef, useState } from "react";
 import { useToast } from "@/components/ui/toast";
 import { UiButton } from "@/components/ui/ui-button";
 import { queueExcelImportAction } from "@/features/documents/actions";
+import { emitWorkspaceEvent, requestDocumentEditorOpen, STORE_EVENTS } from "@/features/documents/lib/workspace-store";
 import { useI18n } from "@/i18n/provider";
 
 export function ExtractImportPanel() {
@@ -29,12 +30,27 @@ export function ExtractImportPanel() {
     setSubmitting(false);
 
     if (!result.ok) {
-      error(t("documents.page.importExcelFailed"), result.error);
+      const errorCode = "errorCode" in result ? result.errorCode : undefined;
+      const errorKeyByCode: Record<string, string> = {
+        FILE_REQUIRED: "documents.page.importExcelErrors.fileRequired",
+        FILE_EMPTY: "documents.page.importExcelErrors.fileEmpty",
+        FILE_TOO_LARGE: "documents.page.importExcelErrors.fileTooLarge",
+        INVALID_EXTENSION: "documents.page.importExcelErrors.invalidExtension",
+        NO_ARTICLE_LINES: "documents.page.importExcelErrors.noLinesDetected",
+        PARSE_FAILED: "documents.page.importExcelErrors.parseFailed",
+      };
+      const localized = errorCode ? t(errorKeyByCode[errorCode] || "documents.page.importExcelFailed") : result.error;
+      error(t("documents.page.importExcelFailed"), localized);
       return;
     }
 
-    success(t("documents.page.importExcelQueued"), `${result.job.fileName} #${result.job.id.slice(-8)}`);
-    info(t("documents.page.importExcelHint"));
+    success(
+      t("documents.page.importExcelDraftCreated"),
+      `${result.document.number} - ${result.document.client}`,
+    );
+    info(t("documents.page.importExcelDraftHint").replace("{count}", String(result.preview.lineCount)));
+    emitWorkspaceEvent(STORE_EVENTS.documentsUpdated);
+    requestDocumentEditorOpen(result.document.id);
   };
 
   return (

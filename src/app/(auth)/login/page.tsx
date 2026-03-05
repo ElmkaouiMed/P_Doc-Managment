@@ -1,10 +1,18 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import {
+  ArrowRight01Icon,
+  Building01Icon,
+  Shield01Icon,
+  UserSquareIcon,
+} from "@hugeicons/core-free-icons";
 
+import { HugIcon } from "@/components/ui/hug-icon";
 import { signInAction, signUpAction } from "@/features/auth/actions";
 import { ensureDemoAccount } from "@/features/auth/lib/demo";
 import { getAuthContext } from "@/features/auth/lib/session";
 import { getServerI18n } from "@/i18n/server";
+import { PasswordField } from "@/app/(auth)/login/password-field";
 
 type LoginPageProps = {
   searchParams?: Promise<{
@@ -53,19 +61,31 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   const errorMessage = resolveAuthError(params.error, t);
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4 py-8">
-      <div className="grid w-full max-w-5xl gap-4 lg:grid-cols-[1.15fr_1fr]">
-        <section className="space-y-4 rounded-md border border-border bg-card/80 p-6">
-          <p className="text-xs uppercase tracking-[0.35em] text-muted-foreground">DOC_v1</p>
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-8">
+      <div className="pointer-events-none absolute -top-24 -left-24 h-64 w-64 rounded-full bg-primary/15 blur-3xl" />
+      <div className="pointer-events-none absolute right-0 bottom-0 h-72 w-72 rounded-full bg-primary/10 blur-3xl" />
+
+      <div className="grid w-full max-w-5xl gap-4 lg:grid-cols-[1.12fr_1fr]">
+        <section className="space-y-5 rounded-xl border border-border/80 bg-card/85 p-6 shadow-xl shadow-black/30">
+          <div className="inline-flex items-center gap-2 rounded-full border border-border bg-background/40 px-3 py-1 text-[11px] uppercase tracking-[0.3em] text-muted-foreground">
+            <HugIcon icon={Shield01Icon} size={14} />
+            DOC_v1
+          </div>
           <h1 className="text-2xl font-semibold text-foreground">{t("auth.login.heroTitle")}</h1>
           <p className="text-sm text-muted-foreground">
             {t("auth.login.heroSubtitle")}
           </p>
 
-          <div className="space-y-2 rounded-md border border-primary/30 bg-primary/10 p-4 text-xs">
+          <div className="space-y-2 rounded-lg border border-primary/30 bg-primary/10 p-4 text-xs">
             <p className="font-semibold text-primary">{t("auth.login.demoTitle")}</p>
-            <p className="text-muted-foreground">{t("auth.login.demoEmail")}: {demo.email}</p>
-            <p className="text-muted-foreground">{t("auth.login.demoPassword")}: {demo.password}</p>
+            <div className="grid gap-1.5">
+              <p className="text-muted-foreground">
+                <span className="font-semibold text-foreground">{t("auth.login.demoEmail")}:</span> {demo.email}
+              </p>
+              <p className="text-muted-foreground">
+                <span className="font-semibold text-foreground">{t("auth.login.demoPassword")}:</span> {demo.password}
+              </p>
+            </div>
           </div>
 
           <p className="text-xs text-muted-foreground">
@@ -73,26 +93,28 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           </p>
         </section>
 
-        <section className="space-y-4 rounded-md border border-border bg-card/80 p-6">
-          <div className="grid grid-cols-2 gap-2 rounded-md border border-border bg-background/50 p-1">
+        <section className="space-y-4 rounded-xl border border-border/80 bg-card/85 p-6 shadow-xl shadow-black/30">
+          <div className="grid grid-cols-2 gap-2 rounded-lg border border-border bg-background/50 p-1">
             <Link
               href="/login?mode=signin"
               className={
                 mode === "signin"
-                  ? "rounded-sm bg-primary/20 px-3 py-2 text-center text-xs font-semibold text-primary"
-                  : "rounded-sm px-3 py-2 text-center text-xs font-semibold text-muted-foreground"
+                  ? "inline-flex items-center justify-center gap-2 rounded-md bg-primary/20 px-3 py-2 text-center text-xs font-semibold text-primary"
+                  : "inline-flex items-center justify-center gap-2 rounded-md px-3 py-2 text-center text-xs font-semibold text-muted-foreground transition hover:text-foreground"
               }
             >
+              <HugIcon icon={UserSquareIcon} size={14} />
               {t("auth.login.signInTab")}
             </Link>
             <Link
               href="/login?mode=signup"
               className={
                 mode === "signup"
-                  ? "rounded-sm bg-primary/20 px-3 py-2 text-center text-xs font-semibold text-primary"
-                  : "rounded-sm px-3 py-2 text-center text-xs font-semibold text-muted-foreground"
+                  ? "inline-flex items-center justify-center gap-2 rounded-md bg-primary/20 px-3 py-2 text-center text-xs font-semibold text-primary"
+                  : "inline-flex items-center justify-center gap-2 rounded-md px-3 py-2 text-center text-xs font-semibold text-muted-foreground transition hover:text-foreground"
               }
             >
+              <HugIcon icon={Building01Icon} size={14} />
               {t("auth.login.signUpTab")}
             </Link>
           </div>
@@ -102,16 +124,22 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           ) : null}
 
           {mode === "signin" ? (
-            <form action={signInAction} className="grid gap-3">
+            <form action={signInAction} className="grid gap-3 w-full">
               <label className="grid gap-1 text-xs">
                 {t("auth.login.emailLabel")}
                 <input name="email" type="email" className={inputClass} placeholder={t("auth.login.emailPlaceholder")} required />
               </label>
-              <label className="grid gap-1 text-xs">
-                {t("auth.login.passwordLabel")}
-                <input name="password" type="password" className={inputClass} placeholder={t("auth.login.passwordPlaceholderSignIn")} required />
-              </label>
+              <PasswordField
+                label={t("auth.login.passwordLabel")}
+                name="password"
+                placeholder={t("auth.login.passwordPlaceholderSignIn")}
+                required
+                className={inputClass}
+                showLabel={t("auth.login.showPassword")}
+                hideLabel={t("auth.login.hidePassword")}
+              />
               <button type="submit" className={submitClass}>
+                <HugIcon icon={ArrowRight01Icon} size={14} />
                 {t("auth.login.signInSubmit")}
               </button>
             </form>
@@ -129,11 +157,18 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                 {t("auth.login.emailLabel")}
                 <input name="email" type="email" className={inputClass} placeholder={t("auth.login.emailPlaceholder")} required />
               </label>
-              <label className="grid gap-1 text-xs">
-                {t("auth.login.passwordLabel")}
-                <input name="password" type="password" className={inputClass} placeholder={t("auth.login.passwordPlaceholderSignUp")} required minLength={8} />
-              </label>
+              <PasswordField
+                label={t("auth.login.passwordLabel")}
+                name="password"
+                placeholder={t("auth.login.passwordPlaceholderSignUp")}
+                required
+                minLength={8}
+                className={inputClass}
+                showLabel={t("auth.login.showPassword")}
+                hideLabel={t("auth.login.hidePassword")}
+              />
               <button type="submit" className={submitClass}>
+                <HugIcon icon={ArrowRight01Icon} size={14} />
                 {t("auth.login.signUpSubmit")}
               </button>
             </form>
@@ -147,4 +182,4 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
 const inputClass =
   "h-10 rounded-md border border-border bg-background/60 px-3 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/40";
 const submitClass =
-  "inline-flex h-10 items-center justify-center rounded-md border border-primary/40 bg-primary/10 px-3 text-xs font-semibold text-primary transition hover:border-primary hover:text-primary-foreground";
+  "inline-flex h-10 items-center justify-center gap-2 rounded-md border border-primary/40 bg-primary/10 px-3 text-xs font-semibold text-primary transition hover:border-primary hover:text-primary-foreground";

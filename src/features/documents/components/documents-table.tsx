@@ -25,11 +25,14 @@ import {
   applyEmailTemplateVariables,
   DOCUMENT_TYPE_OPTIONS,
   DocumentViewMode,
-  getEmailTemplateSettings,
-  getDocumentsViewMode,
-  setDocumentsViewMode,
+  EmailTemplateSettings,
   STORE_EVENTS,
 } from "@/features/documents/lib/workspace-store";
+import {
+  getCompanyEmailTemplatesAction,
+  getCompanyViewPreferenceAction,
+  saveCompanyViewPreferenceAction,
+} from "@/features/settings/actions";
 import { useI18n } from "@/i18n/provider";
 
 type DocumentRow = {
@@ -155,6 +158,19 @@ function statusBadgeClass(status: string) {
   return `${shared} ${byStatus[status] || "border-border text-muted-foreground"}`;
 }
 
+function createDefaultEmailTemplates(): EmailTemplateSettings {
+  const output = {} as EmailTemplateSettings;
+  for (const documentType of DOCUMENT_TYPE_OPTIONS) {
+    output[documentType] = {
+      enabled: true,
+      autoSendOnCreate: false,
+      subject: "",
+      body: "",
+    };
+  }
+  return output;
+}
+
 export function DocumentsTable({ initialRows }: DocumentsTableProps) {
   const { info, success, error } = useToast();
   const { t } = useI18n();
@@ -166,6 +182,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
   const [onlyOverdue, setOnlyOverdue] = useState(false);
   const [onlyPaid, setOnlyPaid] = useState(false);
   const [viewMode, setViewMode] = useState<DocumentViewMode>("table");
+  const [emailTemplates, setEmailTemplates] = useState<EmailTemplateSettings>(() => createDefaultEmailTemplates());
   const [detailsDocumentId, setDetailsDocumentId] = useState<string | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsData, setDetailsData] = useState<DocumentDetails | null>(null);
@@ -200,17 +217,42 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
       void refreshDocuments();
     };
 
-    const timer = window.setTimeout(() => {
-      setViewMode(getDocumentsViewMode());
-    }, 0);
+    const loadSettings = async () => {
+      const [viewModeResult, templatesResult] = await Promise.all([
+        getCompanyViewPreferenceAction("documents"),
+        getCompanyEmailTemplatesAction(),
+      ]);
+      if (!active) {
+        return;
+      }
+      if (viewModeResult.ok) {
+        setViewMode(viewModeResult.mode as DocumentViewMode);
+      }
+      if (templatesResult.ok) {
+        setEmailTemplates(templatesResult.templates as EmailTemplateSettings);
+      }
+    };
+
+    const onTemplatesRefresh = () => {
+      if (!active) {
+        return;
+      }
+      void getCompanyEmailTemplatesAction().then((result) => {
+        if (active && result.ok) {
+          setEmailTemplates(result.templates as EmailTemplateSettings);
+        }
+      });
+    };
 
     window.addEventListener(STORE_EVENTS.documentsUpdated, onRefresh);
+    window.addEventListener(STORE_EVENTS.emailTemplatesUpdated, onTemplatesRefresh);
     void refreshDocuments();
+    void loadSettings();
 
     return () => {
       active = false;
-      window.clearTimeout(timer);
       window.removeEventListener(STORE_EVENTS.documentsUpdated, onRefresh);
+      window.removeEventListener(STORE_EVENTS.emailTemplatesUpdated, onTemplatesRefresh);
     };
   }, [refreshDocuments]);
 
@@ -258,6 +300,11 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
     setStatus("all");
     setOnlyOverdue(false);
     setOnlyPaid(false);
+  };
+
+  const setPreferredViewMode = (mode: DocumentViewMode) => {
+    setViewMode(mode);
+    void saveCompanyViewPreferenceAction({ scope: "documents", mode });
   };
 
   const statusOptions = [
@@ -355,8 +402,8 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
     setDetailsLoading(false);
   };
 
-  const openEditModal = async (row: DocumentRow) => {
-    const result = await getDocumentForEditAction({ documentId: row.id });
+  const openEditModalById = useCallback(async (documentId: string) => {
+    const result = await getDocumentForEditAction({ documentId });
     if (!result.ok) {
       error(t("documents.toasts.loadFailed"), result.error);
       return;
@@ -366,7 +413,27 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
     setDetailsLoading(false);
     setEditDocument(result.document as DocumentEditorInitialData);
     setEditOpen(true);
+  }, [error, t]);
+
+  const openEditModal = async (row: DocumentRow) => {
+    await openEditModalById(row.id);
   };
+
+  useEffect(() => {
+    const onEditorRequested = (event: Event) => {
+      const detail = (event as CustomEvent<{ documentId?: string }>).detail;
+      const documentId = detail?.documentId?.trim();
+      if (!documentId) {
+        return;
+      }
+      void openEditModalById(documentId);
+    };
+
+    window.addEventListener(STORE_EVENTS.documentEditorRequested, onEditorRequested as EventListener);
+    return () => {
+      window.removeEventListener(STORE_EVENTS.documentEditorRequested, onEditorRequested as EventListener);
+    };
+  }, [openEditModalById]);
 
   const sendEmailForDocument = async (row: DocumentRow) => {
     const detailsResult = await getDocumentDetailsAction({ documentId: row.id });
@@ -382,7 +449,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
       return;
     }
 
-    const template = getEmailTemplateSettings()[row.type];
+    const template = emailTemplates[row.type];
     if (!template.enabled) {
       info(t("documents.toasts.emailTemplateDisabled"));
       return;
@@ -593,10 +660,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
               aria-label={t("common.tableView")}
               title={t("common.tableView")}
               variant={viewMode === "table" ? "primary" : "ghost"}
-              onClick={() => {
-                setViewMode("table");
-                setDocumentsViewMode("table");
-              }}
+              onClick={() => setPreferredViewMode("table")}
             />
             <UiButton
               type="button"
@@ -606,10 +670,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
               aria-label={t("common.gridView")}
               title={t("common.gridView")}
               variant={viewMode === "grid" ? "primary" : "ghost"}
-              onClick={() => {
-                setViewMode("grid");
-                setDocumentsViewMode("grid");
-              }}
+              onClick={() => setPreferredViewMode("grid")}
             />
           </div>
         </div>

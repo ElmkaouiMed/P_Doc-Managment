@@ -20,34 +20,44 @@ import { UiButton } from "@/components/ui/ui-button";
 import {
   applyEmailTemplateVariables,
   emitWorkspaceEvent,
-  getEmailTemplateSettings,
   DocumentType,
-  getDefaultTvaRate,
-  listDocumentUnits,
-  saveDocumentUnits,
-  listArticles,
-  listClients,
-  listEnabledDocumentTypes,
-  listTemplateColumns,
   STORE_EVENTS,
   StoredArticle,
   DOCUMENT_TYPE_OPTIONS,
   TemplateLineColumn,
-  upsertArticle,
-  upsertClient,
 } from "@/features/documents/lib/workspace-store";
 import {
   createDocumentFromDraftAction,
+  getDocumentFormLibrariesAction,
   updateDocumentFromDraftAction,
   upsertClientFromDocumentAction,
   upsertProductFromDocumentAction,
 } from "@/features/documents/actions";
+import {
+  getCompanyBusinessConfigAction,
+  getCompanyDocumentUnitsAction,
+  getCompanyEmailTemplatesAction,
+  getCompanyTemplateColumnsAction,
+  saveCompanyDocumentUnitsAction,
+} from "@/features/settings/actions";
 import { useI18n } from "@/i18n/provider";
 
 type WizardStep = "type" | "client" | "articles";
 type LineDraft = {
   id: string;
   values: Record<string, string>;
+};
+
+type ClientLibraryRow = {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  address: string;
+  ice?: string;
+  ifNumber?: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type DocumentSavedRow = {
@@ -179,6 +189,29 @@ function getDefaultType(enabledTypes: DocumentType[]) {
   return enabledTypes[0] ?? "DEVIS";
 }
 
+const DEFAULT_UNITS = ["u", "kg", "m", "m2", "m3", "h", "jour", "forfait"];
+const DEFAULT_TEMPLATE_COLUMNS: TemplateLineColumn[] = [
+  { id: "designation", label: "Designation", dataType: "text", required: true, enabled: true, system: true },
+  { id: "unite", label: "Unite", dataType: "unit", required: false, enabled: true, system: true },
+  { id: "qte", label: "Qte", dataType: "number", required: true, enabled: true, system: true },
+  { id: "pu", label: "P.U HT", dataType: "currency", required: true, enabled: true, system: true },
+  { id: "pt", label: "P.T HT", dataType: "currency", required: false, enabled: true, system: true },
+];
+const DEFAULT_EMAIL_TEMPLATE = {
+  enabled: true,
+  autoSendOnCreate: false,
+  subject: "",
+  body: "",
+};
+
+function createDefaultEmailTemplates(): EmailTemplateSettings {
+  const output = {} as EmailTemplateSettings;
+  for (const documentType of DOCUMENT_TYPE_OPTIONS) {
+    output[documentType] = { ...DEFAULT_EMAIL_TEMPLATE };
+  }
+  return output;
+}
+
 export function NewDocumentModal({
   hideTrigger = false,
   open,
@@ -194,9 +227,10 @@ export function NewDocumentModal({
   const isOpen = isControlled ? open : localOpen;
   const isEditing = Boolean(initialDocument?.id);
   const [step, setStep] = useState<WizardStep>("type");
-  const [enabledTypes, setEnabledTypes] = useState<DocumentType[]>(() => listEnabledDocumentTypes());
-  const [type, setType] = useState<DocumentType>(() => getDefaultType(listEnabledDocumentTypes()));
-  const [tvaRate, setTvaRate] = useState<number>(() => getDefaultTvaRate());
+  const [enabledTypes, setEnabledTypes] = useState<DocumentType[]>(["DEVIS", "FACTURE", "FACTURE_PROFORMA", "BON_LIVRAISON", "BON_COMMANDE"]);
+  const [type, setType] = useState<DocumentType>("DEVIS");
+  const [tvaRate, setTvaRate] = useState<number>(20);
+  const [autoFillArticleUnitPrice, setAutoFillArticleUnitPrice] = useState<boolean>(true);
   const [issueDate, setIssueDate] = useState<string>(() => toDateInputValue(new Date()));
   const [dueDate, setDueDate] = useState<string>("");
   const [dueDateTouched, setDueDateTouched] = useState(false);
@@ -208,16 +242,18 @@ export function NewDocumentModal({
   const [clientIce, setClientIce] = useState("");
   const [clientIf, setClientIf] = useState("");
 
-  const [units, setUnits] = useState<string[]>(() => listDocumentUnits());
-  const [defaultUnit, setDefaultUnit] = useState(() => resolveDefaultUnit(listDocumentUnits()));
-  const [columns, setColumns] = useState<TemplateLineColumn[]>(() => listTemplateColumns(type).filter((column) => column.enabled));
+  const [units, setUnits] = useState<string[]>(DEFAULT_UNITS);
+  const [defaultUnit, setDefaultUnit] = useState(() => resolveDefaultUnit(DEFAULT_UNITS));
+  const [columns, setColumns] = useState<TemplateLineColumn[]>(() => DEFAULT_TEMPLATE_COLUMNS.filter((column) => column.enabled));
   const [lines, setLines] = useState<LineDraft[]>(() => [
-    rowFromColumns(listTemplateColumns(type).filter((column) => column.enabled), {}, resolveDefaultUnit(listDocumentUnits())),
+    rowFromColumns(DEFAULT_TEMPLATE_COLUMNS.filter((column) => column.enabled), {}, resolveDefaultUnit(DEFAULT_UNITS)),
   ]);
-  const [savedClients, setSavedClients] = useState(() => listClients());
-  const [savedArticles, setSavedArticles] = useState(() => listArticles());
+  const [savedClients, setSavedClients] = useState<ClientLibraryRow[]>([]);
+  const [savedArticles, setSavedArticles] = useState<StoredArticle[]>([]);
+  const [emailTemplates, setEmailTemplates] = useState<EmailTemplateSettings>(() => createDefaultEmailTemplates());
   const [articleQuery, setArticleQuery] = useState("");
   const [editingClientId, setEditingClientId] = useState<string | null>(null);
+  const [selectedLineIds, setSelectedLineIds] = useState<string[]>([]);
 
   const requiredClientReady = useMemo(() => {
     return clientName.trim().length > 1 && clientPhone.trim().length > 1 && clientAddress.trim().length > 2;
@@ -232,6 +268,8 @@ export function NewDocumentModal({
   );
   const unitPriceReady = linesMissingUnitPrice.length === 0;
   const canCreate = requiredClientReady && dueDateReady && validLines.length > 0 && unitPriceReady;
+  const selectedLinesCount = selectedLineIds.length;
+  const allLinesSelected = lines.length > 0 && selectedLinesCount === lines.length;
 
   const subtotalHT = useMemo(() => {
     return validLines.reduce((total, line) => total + computePt(line.values), 0);
@@ -250,6 +288,11 @@ export function NewDocumentModal({
     const source = units.length ? units : [defaultUnit];
     return source.map((unit) => ({ value: unit, label: unit }));
   }, [defaultUnit, units]);
+  const orderedLineColumns = useMemo(() => {
+    const designationColumn = columns.find((column) => column.id === "designation");
+    const otherColumns = columns.filter((column) => column.id !== "designation");
+    return designationColumn ? [designationColumn, ...otherColumns] : columns;
+  }, [columns]);
   const documentTypeLabel = (documentType: DocumentType) => t(DOCUMENT_TYPE_I18N_KEYS[documentType] || "documents.types.devis");
 
   const setOpenState = (next: boolean) => {
@@ -260,91 +303,96 @@ export function NewDocumentModal({
   };
 
   useEffect(() => {
-    const syncConfig = () => {
-      const nextEnabledTypes = listEnabledDocumentTypes();
-      const nextType = nextEnabledTypes.includes(type) ? type : getDefaultType(nextEnabledTypes);
-      const nextColumns = listTemplateColumns(nextType).filter((column) => column.enabled);
-      const nextUnits = listDocumentUnits();
+    if (!isOpen) {
+      return;
+    }
+    let mounted = true;
+    const loadRuntimeData = async () => {
+      const [librariesResult, businessResult, unitsResult, templatesResult] = await Promise.all([
+        getDocumentFormLibrariesAction(),
+        getCompanyBusinessConfigAction(),
+        getCompanyDocumentUnitsAction(),
+        getCompanyEmailTemplatesAction(),
+      ]);
+      if (!mounted) {
+        return;
+      }
+
+      const nextEnabledTypes = businessResult.ok
+        ? (businessResult.config.enabledDocumentTypes as DocumentType[])
+        : ["DEVIS", "FACTURE", "FACTURE_PROFORMA", "BON_LIVRAISON", "BON_COMMANDE"];
+      const preferredType = initialDocument
+        ? initialDocument.type
+        : getDefaultType(nextEnabledTypes);
+      const nextType = nextEnabledTypes.includes(preferredType) ? preferredType : getDefaultType(nextEnabledTypes);
+
+      const columnsResult = await getCompanyTemplateColumnsAction(nextType);
+      if (!mounted) {
+        return;
+      }
+      const nextColumns = columnsResult.ok
+        ? (columnsResult.columns as TemplateLineColumn[]).filter((column) => column.enabled)
+        : DEFAULT_TEMPLATE_COLUMNS.filter((column) => column.enabled);
+      const nextUnits = unitsResult.ok ? unitsResult.units : DEFAULT_UNITS;
       const nextDefaultUnit = resolveDefaultUnit(nextUnits);
 
       setEnabledTypes(nextEnabledTypes);
       setType(nextType);
-      setTvaRate(getDefaultTvaRate());
+      setTvaRate(businessResult.ok ? businessResult.config.defaultTvaRate : 20);
+      setAutoFillArticleUnitPrice(businessResult.ok ? businessResult.config.autoFillArticleUnitPrice : true);
       setUnits(nextUnits);
       setDefaultUnit(nextDefaultUnit);
       setColumns(nextColumns);
-      setLines((current) => {
-        if (current.length === 0) {
-          return [rowFromColumns(nextColumns, {}, nextDefaultUnit)];
-        }
-        return current.map((line) => rowFromColumns(nextColumns, line.values, nextDefaultUnit));
-      });
+      setSavedClients(librariesResult.ok ? librariesResult.clients as ClientLibraryRow[] : []);
+      setSavedArticles(librariesResult.ok ? librariesResult.articles : []);
+      setEmailTemplates(templatesResult.ok ? templatesResult.templates as EmailTemplateSettings : createDefaultEmailTemplates());
+
+      if (initialDocument) {
+        const mappedLines = initialDocument.lines.length
+          ? initialDocument.lines.map((line) => rowFromColumns(nextColumns, line, nextDefaultUnit))
+          : [rowFromColumns(nextColumns, {}, nextDefaultUnit)];
+        setIssueDate((initialDocument.issueDate || new Date().toISOString()).slice(0, 10));
+        setDueDate((initialDocument.dueDate || "").slice(0, 10));
+        setDueDateTouched(Boolean(initialDocument.dueDate));
+        setLines(mappedLines);
+        setClientName(initialDocument.client.name || "");
+        setClientEmail(initialDocument.client.email || "");
+        setClientPhone(initialDocument.client.phone || "");
+        setClientAddress(initialDocument.client.address || "");
+        setClientIce(initialDocument.client.ice || "");
+        setClientIf(initialDocument.client.ifNumber || "");
+        setEditingClientId(initialDocument.client.id || null);
+        setArticleQuery("");
+        setSelectedLineIds([]);
+        setStep("client");
+        return;
+      }
+
+      const today = toDateInputValue(new Date());
+      setIssueDate(today);
+      setDueDate(nextType === "FACTURE" ? addDaysToDateInput(today, 30) : "");
+      setDueDateTouched(false);
+      setLines([rowFromColumns(nextColumns, {}, nextDefaultUnit)]);
+      setClientName("");
+      setClientEmail("");
+      setClientPhone("");
+      setClientAddress("");
+      setClientIce("");
+      setClientIf("");
+      setEditingClientId(null);
+      setArticleQuery("");
+      setSelectedLineIds([]);
+      setStep("type");
     };
 
-    const syncLibraries = () => {
-      setSavedClients(listClients());
-      setSavedArticles(listArticles());
-    };
-    const syncUnits = () => {
-      const nextUnits = listDocumentUnits();
-      const nextDefaultUnit = resolveDefaultUnit(nextUnits);
-      setUnits(nextUnits);
-      setDefaultUnit(nextDefaultUnit);
-      setLines((current) => current.map((line) => ({ ...line, values: normalizeLineValues(line.values, nextDefaultUnit) })));
-    };
-
-    window.addEventListener(STORE_EVENTS.businessConfigUpdated, syncConfig);
-    window.addEventListener(STORE_EVENTS.clientsUpdated, syncLibraries);
-    window.addEventListener(STORE_EVENTS.articlesUpdated, syncLibraries);
-    window.addEventListener(STORE_EVENTS.unitsUpdated, syncUnits);
+    void loadRuntimeData();
     return () => {
-      window.removeEventListener(STORE_EVENTS.businessConfigUpdated, syncConfig);
-      window.removeEventListener(STORE_EVENTS.clientsUpdated, syncLibraries);
-      window.removeEventListener(STORE_EVENTS.articlesUpdated, syncLibraries);
-      window.removeEventListener(STORE_EVENTS.unitsUpdated, syncUnits);
+      mounted = false;
     };
-  }, [type]);
-
-  useEffect(() => {
-    if (!isOpen || !initialDocument) {
-      return;
-    }
-
-    const nextColumns = listTemplateColumns(initialDocument.type).filter((column) => column.enabled);
-    const nextUnits = listDocumentUnits();
-    const nextDefaultUnit = resolveDefaultUnit(nextUnits);
-    const mappedLines = initialDocument.lines.length
-      ? initialDocument.lines.map((line) => rowFromColumns(nextColumns, line, nextDefaultUnit))
-      : [rowFromColumns(nextColumns, {}, nextDefaultUnit)];
-
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setEnabledTypes(listEnabledDocumentTypes());
-    setType(initialDocument.type);
-    setTvaRate(initialDocument.tvaRate);
-    setIssueDate((initialDocument.issueDate || new Date().toISOString()).slice(0, 10));
-    setDueDate((initialDocument.dueDate || "").slice(0, 10));
-    setDueDateTouched(Boolean(initialDocument.dueDate));
-    setUnits(nextUnits);
-    setDefaultUnit(nextDefaultUnit);
-    setColumns(nextColumns);
-    setLines(mappedLines);
-    setClientName(initialDocument.client.name || "");
-    setClientEmail(initialDocument.client.email || "");
-    setClientPhone(initialDocument.client.phone || "");
-    setClientAddress(initialDocument.client.address || "");
-    setClientIce(initialDocument.client.ice || "");
-    setClientIf(initialDocument.client.ifNumber || "");
-    setEditingClientId(initialDocument.client.id || null);
-    setSavedClients(listClients());
-    setSavedArticles(listArticles());
-    setArticleQuery("");
-    setStep("client");
   }, [initialDocument, isOpen]);
 
   const resetWizard = (nextType: DocumentType) => {
-    const nextColumns = listTemplateColumns(nextType).filter((column) => column.enabled);
-    const nextUnits = listDocumentUnits();
-    const nextDefaultUnit = resolveDefaultUnit(nextUnits);
+    const nextDefaultUnit = resolveDefaultUnit(units);
     const today = toDateInputValue(new Date());
     setStep("type");
     setIssueDate(today);
@@ -357,36 +405,13 @@ export function NewDocumentModal({
     setClientIce("");
     setClientIf("");
     setEditingClientId(null);
-    setUnits(nextUnits);
     setDefaultUnit(nextDefaultUnit);
-    setColumns(nextColumns);
-    setLines([rowFromColumns(nextColumns, {}, nextDefaultUnit)]);
+    setLines([rowFromColumns(columns, {}, nextDefaultUnit)]);
     setArticleQuery("");
+    setSelectedLineIds([]);
   };
 
   const openModal = () => {
-    const nextEnabledTypes = listEnabledDocumentTypes();
-    const nextType = nextEnabledTypes.includes(type) ? type : getDefaultType(nextEnabledTypes);
-    const nextColumns = listTemplateColumns(nextType).filter((column) => column.enabled);
-    const nextUnits = listDocumentUnits();
-    const nextDefaultUnit = resolveDefaultUnit(nextUnits);
-    const today = toDateInputValue(new Date());
-
-    setEnabledTypes(nextEnabledTypes);
-    setType(nextType);
-    setTvaRate(getDefaultTvaRate());
-    setIssueDate(today);
-    setDueDate(nextType === "FACTURE" ? addDaysToDateInput(today, 30) : "");
-    setDueDateTouched(false);
-    setUnits(nextUnits);
-    setDefaultUnit(nextDefaultUnit);
-    setColumns(nextColumns);
-    setLines([rowFromColumns(nextColumns, {}, nextDefaultUnit)]);
-    setSavedClients(listClients());
-    setSavedArticles(listArticles());
-    setArticleQuery("");
-    setEditingClientId(null);
-    setStep("type");
     setOpenState(true);
   };
 
@@ -407,13 +432,29 @@ export function NewDocumentModal({
       setDueDate("");
       setDueDateTouched(false);
     }
-    const nextColumns = listTemplateColumns(nextType).filter((column) => column.enabled);
-    const nextDefaultUnit = resolveDefaultUnit(units);
-    setColumns(nextColumns);
-    setLines((current) => {
-      const mapped = current.map((line) => rowFromColumns(nextColumns, line.values, nextDefaultUnit));
-      return mapped.length ? mapped : [rowFromColumns(nextColumns, {}, nextDefaultUnit)];
-    });
+    void getCompanyTemplateColumnsAction(nextType)
+      .then((result) => {
+        const nextColumns = result.ok
+          ? (result.columns as TemplateLineColumn[]).filter((column) => column.enabled)
+          : DEFAULT_TEMPLATE_COLUMNS.filter((column) => column.enabled);
+        const nextDefaultUnit = resolveDefaultUnit(units);
+        setColumns(nextColumns);
+        setSelectedLineIds([]);
+        setLines((current) => {
+          const mapped = current.map((line) => rowFromColumns(nextColumns, line.values, nextDefaultUnit));
+          return mapped.length ? mapped : [rowFromColumns(nextColumns, {}, nextDefaultUnit)];
+        });
+      })
+      .catch(() => {
+        const nextColumns = DEFAULT_TEMPLATE_COLUMNS.filter((column) => column.enabled);
+        const nextDefaultUnit = resolveDefaultUnit(units);
+        setColumns(nextColumns);
+        setSelectedLineIds([]);
+        setLines((current) => {
+          const mapped = current.map((line) => rowFromColumns(nextColumns, line.values, nextDefaultUnit));
+          return mapped.length ? mapped : [rowFromColumns(nextColumns, {}, nextDefaultUnit)];
+        });
+      });
   };
 
   const onIssueDateChange = (value: string) => {
@@ -459,6 +500,7 @@ export function NewDocumentModal({
   };
 
   const removeLine = (lineId: string) => {
+    setSelectedLineIds((current) => current.filter((id) => id !== lineId));
     setLines((current) => {
       const next = current.filter((line) => line.id !== lineId);
       return next.length ? next : [rowFromColumns(columns, {}, defaultUnit)];
@@ -502,8 +544,20 @@ export function NewDocumentModal({
       return;
     }
     const nextUnits = [...units, ...additions];
-    saveDocumentUnits(nextUnits);
     setUnits(nextUnits);
+    setDefaultUnit(resolveDefaultUnit(nextUnits));
+    void saveCompanyDocumentUnitsAction(nextUnits)
+      .then((result) => {
+        if (!result.ok) {
+          return;
+        }
+        setUnits(result.units);
+        setDefaultUnit(resolveDefaultUnit(result.units));
+        emitWorkspaceEvent(STORE_EVENTS.unitsUpdated);
+      })
+      .catch(() => {
+        // Keep in-memory units if DB save fails.
+      });
     if (notify) {
       const detail = additions.length === 1 ? additions[0] : t("documents.form.toasts.unitsAddedHint").replace("{count}", String(additions.length));
       info(t("documents.form.toasts.unitAdded"), detail);
@@ -528,10 +582,198 @@ export function NewDocumentModal({
           values: normalizeLineValues({
             ...line.values,
             ...hit.values,
+            pu: autoFillArticleUnitPrice ? (hit.values.pu ?? line.values.pu) : line.values.pu,
             designation: hit.designation,
           }, defaultUnit),
         };
       }),
+    );
+  };
+
+  const lineFieldLabel = (column: TemplateLineColumn) => {
+    if (column.id === "designation") {
+      return t("documents.form.designation");
+    }
+    if (column.id === "unite") {
+      return t("documents.form.unit");
+    }
+    if (column.id === "qte") {
+      return t("documents.form.qty");
+    }
+    if (column.id === "pu") {
+      return t("documents.form.unitPriceHT");
+    }
+    if (column.id === "pt") {
+      return t("documents.form.lineTotalHT");
+    }
+    return column.label;
+  };
+
+  const renderLineField = (line: LineDraft, column: TemplateLineColumn) => {
+    if (column.id === "designation") {
+      return (
+        <FormField
+          type="text"
+          label={lineFieldLabel(column)}
+          value={line.values.designation || ""}
+          list="saved-articles-list"
+          onBlur={(value) => tryAutoFillArticle(line.id, value)}
+          onChange={(value) => {
+            updateLine(line.id, "designation", value);
+            tryAutoFillArticle(line.id, value);
+          }}
+          placeholder={t("documents.form.designation")}
+          inputClassName="h-9 text-[12px]"
+        />
+      );
+    }
+
+    const isUnitField = column.dataType === "unit" || column.id === "unite";
+    const isReadOnlyTotal = column.id === "pt";
+    const isNumericField =
+      column.dataType === "number" ||
+      column.dataType === "currency" ||
+      column.id === "qte" ||
+      column.id === "pu" ||
+      isReadOnlyTotal;
+    const value =
+      column.id === "unite"
+        ? (line.values.unite || defaultUnit)
+        : (line.values[column.id] || "");
+
+    if (isUnitField) {
+      return (
+        <FormField
+          type="text"
+          label={lineFieldLabel(column)}
+          value={value}
+          list="saved-units-list"
+          placeholder={t("documents.form.unitPlaceholder")}
+          onChange={(next) => updateLine(line.id, column.id, next)}
+          onBlur={(next) => {
+            const normalized = normalizeUnitInput(next);
+            if (column.id === "unite") {
+              const safe = normalized || defaultUnit;
+              updateLine(line.id, column.id, safe);
+              persistUnits([safe], true);
+              return;
+            }
+            updateLine(line.id, column.id, normalized);
+            if (normalized) {
+              persistUnits([normalized], true);
+            }
+          }}
+          inputClassName="h-9 text-center text-[12px]"
+        />
+      );
+    }
+
+    if (isNumericField) {
+      const step =
+        column.id === "qte"
+          ? "0.001"
+          : (column.dataType === "currency" || column.id === "pu" || column.id === "pt")
+            ? "0.01"
+            : "1";
+      return (
+        <FormField
+          type="number"
+          label={lineFieldLabel(column)}
+          value={value}
+          readOnly={isReadOnlyTotal}
+          onChange={(next) => updateLine(line.id, column.id, next)}
+          min="0"
+          step={step}
+          inputClassName={
+            isReadOnlyTotal
+              ? "h-9 bg-background/40 text-end text-[12px] font-semibold tabular-nums"
+              : "h-9 text-end text-[12px] tabular-nums"
+          }
+        />
+      );
+    }
+
+    return (
+      <FormField
+        type="text"
+        label={lineFieldLabel(column)}
+        value={value}
+        onChange={(next) => updateLine(line.id, column.id, next)}
+        inputClassName="h-9 text-[12px]"
+      />
+    );
+  };
+
+  const toggleLineSelection = (lineId: string) => {
+    setSelectedLineIds((current) => (current.includes(lineId) ? current.filter((id) => id !== lineId) : [...current, lineId]));
+  };
+
+  const toggleSelectAllLines = () => {
+    setSelectedLineIds((current) => (current.length === lines.length ? [] : lines.map((line) => line.id)));
+  };
+
+  const exportSelectedLines = () => {
+    if (!selectedLineIds.length) {
+      error(t("documents.form.toasts.selectLinesFirst"));
+      return;
+    }
+    const selectedSet = new Set(selectedLineIds);
+    const selectedLines = lines.filter((line) => selectedSet.has(line.id));
+    const escapeCsvCell = (value: string) => `"${value.replace(/"/g, "\"\"")}"`;
+    const rows = [
+      ["designation", "unit", "qty", "unit_price", "total"].join(","),
+      ...selectedLines.map((line) =>
+        [
+          line.values.designation || "",
+          line.values.unite || "",
+          line.values.qte || "0",
+          line.values.pu || "0",
+          line.values.pt || "0.00",
+        ]
+          .map(escapeCsvCell)
+          .join(","),
+      ),
+    ];
+    const blob = new Blob([`\uFEFF${rows.join("\n")}`], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${type.toLowerCase()}-lines-${issueDate || "document"}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+    success(
+      t("documents.form.toasts.selectedLinesExported"),
+      t("documents.form.toasts.selectedLinesExportedHint").replace("{count}", String(selectedLines.length)),
+    );
+  };
+
+  const removeSelectedLines = async () => {
+    if (!selectedLineIds.length) {
+      error(t("documents.form.toasts.selectLinesFirst"));
+      return;
+    }
+    const shouldDelete = await confirm({
+      title: t("documents.form.confirm.deleteSelectedLinesTitle"),
+      description: t("documents.form.confirm.deleteSelectedLinesDescription").replace("{count}", String(selectedLineIds.length)),
+      confirmLabel: t("documents.form.confirm.deleteSelectedLinesConfirm"),
+      cancelLabel: t("documents.form.confirm.deleteSelectedLinesCancel"),
+      variant: "danger",
+    });
+    if (!shouldDelete) {
+      return;
+    }
+
+    const selectedSet = new Set(selectedLineIds);
+    setLines((current) => {
+      const next = current.filter((line) => !selectedSet.has(line.id));
+      return next.length ? next : [rowFromColumns(columns, {}, defaultUnit)];
+    });
+    setSelectedLineIds([]);
+    success(
+      t("documents.form.toasts.linesDeleted"),
+      t("documents.form.toasts.linesDeletedHint").replace("{count}", String(selectedLineIds.length)),
     );
   };
 
@@ -555,43 +797,19 @@ export function NewDocumentModal({
     const existingClient = savedClients.find((item) => item.name.trim().toLowerCase() === clientName.trim().toLowerCase());
     let savedClientName = clientName.trim();
     let dbClientId: string | null = null;
+    let shouldPersistClient = Boolean(existingClient) || isEditing;
 
     if (!existingClient) {
       if (!isEditing) {
-        const shouldSaveClient = await confirm({
+        shouldPersistClient = await confirm({
           title: t("documents.form.confirm.saveClientTitle"),
           description: t("documents.form.confirm.saveClientDescription"),
           confirmLabel: t("documents.form.confirm.saveClientConfirm"),
           cancelLabel: t("documents.form.confirm.saveClientSkip"),
         });
 
-        if (shouldSaveClient) {
-          const savedClient = upsertClient({
-            name: clientName,
-            email: clientEmail,
-            phone: clientPhone,
-            address: clientAddress,
-            ice: clientIce,
-            ifNumber: clientIf,
-          });
-          if (savedClient) {
-            savedClientName = savedClient.name;
-            success(t("documents.form.toasts.clientSaved"), savedClient.name);
-          }
-
-          const dbClientResult = await upsertClientFromDocumentAction({
-            name: clientName,
-            email: clientEmail,
-            phone: clientPhone,
-            address: clientAddress,
-            ice: clientIce,
-            ifNumber: clientIf,
-          });
-          if (!dbClientResult.ok) {
-            error(t("documents.form.toasts.dbClientSaveFailed"), dbClientResult.error);
-            return;
-          }
-          dbClientId = dbClientResult.client.id;
+        if (shouldPersistClient) {
+          success(t("documents.form.toasts.clientSaved"), clientName.trim());
         }
       }
     } else {
@@ -599,20 +817,22 @@ export function NewDocumentModal({
       dbClientId = existingClient.id;
     }
 
-    const dbClientResult = await upsertClientFromDocumentAction({
-      name: clientName,
-      email: clientEmail,
-      phone: clientPhone,
-      address: clientAddress,
-      ice: clientIce,
-      ifNumber: clientIf,
-    });
-    if (!dbClientResult.ok) {
-      error(t("documents.form.toasts.dbClientSaveFailed"), dbClientResult.error);
-      return;
+    if (shouldPersistClient) {
+      const dbClientResult = await upsertClientFromDocumentAction({
+        name: clientName,
+        email: clientEmail,
+        phone: clientPhone,
+        address: clientAddress,
+        ice: clientIce,
+        ifNumber: clientIf,
+      });
+      if (!dbClientResult.ok) {
+        error(t("documents.form.toasts.dbClientSaveFailed"), dbClientResult.error);
+        return;
+      }
+      dbClientId = dbClientResult.client.id;
+      savedClientName = dbClientResult.client.name;
     }
-    dbClientId = dbClientResult.client.id;
-    savedClientName = dbClientResult.client.name;
 
     const normalizedLines = validLines.map((line) => normalizeLineValues(line.values, defaultUnit));
     persistUnits(normalizedLines.map((line) => line.unite || ""), false);
@@ -631,8 +851,9 @@ export function NewDocumentModal({
       return !findArticleInLibrary(designation);
     });
 
+    let shouldPersistArticles = false;
     if (newArticles.length > 0) {
-      const shouldSaveArticles = await confirm({
+      shouldPersistArticles = await confirm({
         title: t("documents.form.confirm.saveArticlesTitle"),
         description:
           newArticles.length === 1
@@ -642,36 +863,40 @@ export function NewDocumentModal({
         cancelLabel: t("documents.form.confirm.saveArticlesSkip"),
       });
 
-      if (shouldSaveArticles) {
-        for (const line of newArticles) {
-          upsertArticle(line);
-        }
+      if (shouldPersistArticles) {
         success(t("documents.form.toasts.articlesSaved"), t("documents.form.toasts.articlesSavedHint").replace("{count}", String(newArticles.length)));
-        setSavedArticles(listArticles());
       }
     }
 
-    const dbProductKeys = new Set<string>();
-    for (const line of normalizedLines) {
-      const designation = (line.designation || "").trim();
-      if (!designation) {
-        continue;
-      }
-      const key = designation.toLowerCase();
-      if (dbProductKeys.has(key)) {
-        continue;
-      }
-      dbProductKeys.add(key);
+    if (shouldPersistArticles) {
+      const dbProductKeys = new Set<string>();
+      for (const line of newArticles) {
+        const designation = (line.designation || "").trim();
+        if (!designation) {
+          continue;
+        }
+        const key = designation.toLowerCase();
+        if (dbProductKeys.has(key)) {
+          continue;
+        }
+        dbProductKeys.add(key);
 
-      const dbProductResult = await upsertProductFromDocumentAction({
-        designation,
-        unite: line.unite,
-        pu: line.pu,
-        tvaRate,
-      });
-      if (!dbProductResult.ok) {
-        error(t("documents.form.toasts.dbArticleSaveFailed"), dbProductResult.error);
-        return;
+        const dbProductResult = await upsertProductFromDocumentAction({
+          designation,
+          unite: line.unite,
+          pu: line.pu,
+          tvaRate,
+        });
+        if (!dbProductResult.ok) {
+          error(t("documents.form.toasts.dbArticleSaveFailed"), dbProductResult.error);
+          return;
+        }
+      }
+
+      const refreshedLibraries = await getDocumentFormLibrariesAction();
+      if (refreshedLibraries.ok) {
+        setSavedClients(refreshedLibraries.clients as ClientLibraryRow[]);
+        setSavedArticles(refreshedLibraries.articles);
       }
     }
 
@@ -712,7 +937,7 @@ export function NewDocumentModal({
     onDocumentSaved?.(saved);
 
     if (!isEditing && clientEmail.trim()) {
-      const template = getEmailTemplateSettings()[type];
+      const template = emailTemplates[type];
       if (template.enabled && template.autoSendOnCreate) {
         const subject = applyEmailTemplateVariables(template.subject, {
           client_name: savedClientName,
@@ -744,8 +969,8 @@ export function NewDocumentModal({
         </button>
       ) : null}
       {isOpen ? (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4">
-          <div className="w-full max-w-7xl rounded-md border border-border bg-card/95 p-5 shadow-2xl shadow-black/50">
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-3 sm:p-4">
+          <div className="flex h-[86vh] max-h-[86vh] w-full max-w-7xl flex-col overflow-hidden rounded-xl border border-border bg-card p-3 shadow-2xl shadow-black/50 sm:p-4">
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <p className="text-xs uppercase tracking-[0.4em] text-muted-foreground">{t("documents.form.documentTag")}</p>
@@ -754,11 +979,15 @@ export function NewDocumentModal({
               <UiButton type="button" variant="ghost" size="xs" onClick={closeModal} iconOnly iconName="close" />
             </div>
 
-            <div className="mb-4 grid grid-cols-3 gap-2 rounded-md border border-border bg-background/30 p-2 text-xs">
+            <div className="mb-4 grid grid-cols-3 gap-2 rounded-lg border border-border bg-background/40 p-1.5 text-xs">
               <button
                 type="button"
                 onClick={() => setStep("type")}
-                className={step === "type" ? "rounded-sm bg-primary/20 px-2 py-2 text-primary" : "rounded-sm px-2 py-2 text-muted-foreground"}
+                className={
+                  step === "type"
+                    ? "rounded-md bg-primary/20 px-2 py-2 font-semibold text-primary"
+                    : "rounded-md px-2 py-2 text-muted-foreground transition hover:text-foreground"
+                }
               >
                 {t("documents.form.step1")}
               </button>
@@ -768,8 +997,8 @@ export function NewDocumentModal({
                 onClick={() => setStep("client")}
                 className={
                   step === "client"
-                    ? "rounded-sm bg-primary/20 px-2 py-2 text-primary disabled:cursor-not-allowed disabled:opacity-50"
-                    : "rounded-sm px-2 py-2 text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                    ? "rounded-md bg-primary/20 px-2 py-2 font-semibold text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                    : "rounded-md px-2 py-2 text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                 }
               >
                 {t("documents.form.step2")}
@@ -780,242 +1009,229 @@ export function NewDocumentModal({
                 onClick={() => setStep("articles")}
                 className={
                   step === "articles"
-                    ? "rounded-sm bg-primary/20 px-2 py-2 text-primary disabled:cursor-not-allowed disabled:opacity-50"
-                    : "rounded-sm px-2 py-2 text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                    ? "rounded-md bg-primary/20 px-2 py-2 font-semibold text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                    : "rounded-md px-2 py-2 text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                 }
               >
                 {t("documents.form.step3")}
               </button>
             </div>
 
-            {step === "type" ? (
-              <div className="space-y-3">
-                <p className="text-xs text-muted-foreground">{t("documents.form.typeHint")}</p>
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                  {enabledTypes.map((documentType) => (
-                    <button
-                      key={documentType}
-                      type="button"
-                      onClick={() => updateType(documentType)}
-                      className={
-                        type === documentType
-                          ? "flex flex-col items-center gap-3 rounded-md border border-primary/40 bg-primary/10 px-3 py-3 text-left text-sm font-semibold text-primary"
-                          : "flex flex-col items-center gap-3 rounded-md border border-border bg-background/40 px-3 py-3 text-left text-sm font-semibold text-muted-foreground transition hover:text-foreground"
-                      }
-                    >
-                      <HugIcon icon={documentTypeIcons[documentType]} size={18} />
-                      <span>{documentTypeLabel(documentType)}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            {step === "client" ? (
-              <div className="grid gap-4 md:grid-cols-3">
-                <div className="rounded-md border border-border bg-background/30 p-3 text-xs text-muted-foreground">
-                  {t("documents.form.selectedType")}
-                  <p className="mt-1 text-sm font-semibold text-foreground">{documentTypeLabel(type)}</p>
-                </div>
-                <FormField
-                  type="date"
-                  label={t("documents.form.issueDate")}
-                  value={issueDate}
-                  onChange={onIssueDateChange}
-                />
-                {requiresDueDate ? (
-                  <FormField
-                    type="date"
-                    label={t("documents.form.dueDate")}
-                    required
-                    value={dueDate}
-                    min={issueDate}
-                    onChange={onDueDateChange}
-                  />
-                ) : (
-                  <div />
-                )}
-                <FormField
-                  type="text"
-                  label={t("documents.form.clientName")}
-                  required
-                  value={clientName}
-                  onChange={onClientNameChange}
-                  onBlur={syncClientFromLibrary}
-                  list="saved-clients-list"
-                  placeholder={t("documents.form.clientNamePlaceholder")}
-                  className="md:col-span-2"
-                />
-                <datalist id="saved-clients-list">
-                  {savedClients.map((client) => (
-                    <option key={client.id} value={client.name} />
-                  ))}
-                </datalist>
-
-                <FormField type="email" label={t("documents.form.clientEmail")} value={clientEmail} onChange={setClientEmail} placeholder={t("documents.form.clientEmailPlaceholder")} />
-                <FormField type="text" label={t("documents.form.clientPhone")} required value={clientPhone} onChange={setClientPhone} placeholder={t("documents.form.clientPhonePlaceholder")} />
-                <FormField type="text" label={t("documents.form.clientIce")} value={clientIce} onChange={setClientIce} placeholder={t("documents.form.clientIcePlaceholder")} />
-
-                <FormField type="text" label={t("documents.form.clientIf")} value={clientIf} onChange={setClientIf} placeholder={t("documents.form.clientIfPlaceholder")} />
-                <FormField
-                  type="text"
-                  label={t("documents.form.clientAddress")}
-                  required
-                  value={clientAddress}
-                  onChange={setClientAddress}
-                  placeholder={t("documents.form.clientAddressPlaceholder")}
-                  className="md:col-span-2"
-                />
-              </div>
-            ) : null}
-
-            {step === "articles" ? (
-              <div className="grid gap-4 xl:grid-cols-[320px_1fr]">
-                <aside className="space-y-3 rounded-md border border-border bg-background/20 p-3">
-                  <p className="text-xs text-muted-foreground">{t("documents.form.posPicker")}</p>
-                  <FormField
-                    type="text"
-                    value={articleQuery}
-                    onChange={setArticleQuery}
-                    placeholder={t("documents.form.searchArticles")}
-                  />
-                  <div className="max-h-[350px] space-y-2 overflow-y-auto pr-1">
-                    {suggestedArticles.map((article) => (
-                      <button
-                        key={article.id}
-                        type="button"
-                        onClick={() => addLineFromArticle(article)}
-                        className="w-full rounded-md border border-border bg-background/50 px-3 py-2 text-left text-xs text-muted-foreground transition hover:text-foreground"
-                      >
-                        <p className="font-semibold text-foreground">{article.designation}</p>
-                        <p>{t("documents.form.articleHint").replace("{pu}", article.values.pu || "0.00").replace("{unit}", article.values.unite || defaultUnit)}</p>
-                      </button>
-                    ))}
-                    {suggestedArticles.length === 0 ? (
-                      <p className="rounded-md border border-border bg-background/50 px-3 py-2 text-xs text-muted-foreground">{t("documents.form.noArticleMatch")}</p>
-                    ) : null}
+            <div className="min-h-0 flex flex-1 flex-col overflow-hidden">
+              <div className="min-h-0 flex-1 overflow-y-auto pr-1 sm:pr-2">
+                {step === "type" ? (
+                  <div className="h-full space-y-3 overflow-y-auto pr-1 sm:pr-2">
+                    <p className="text-xs text-muted-foreground">{t("documents.form.typeHint")}</p>
+                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                      {enabledTypes.map((documentType) => (
+                        <button
+                          key={documentType}
+                          type="button"
+                          onClick={() => updateType(documentType)}
+                          className={
+                            type === documentType
+                              ? "flex flex-col items-center gap-3 rounded-md border border-primary/40 bg-primary/10 px-3 py-3 text-left text-sm font-semibold text-primary"
+                              : "flex flex-col items-center gap-3 rounded-md border border-border bg-background/40 px-3 py-3 text-left text-sm font-semibold text-muted-foreground transition hover:text-foreground"
+                          }
+                        >
+                          <HugIcon icon={documentTypeIcons[documentType]} size={18} />
+                          <span>{documentTypeLabel(documentType)}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <UiButton type="button" size="sm" variant="outline" icon="plus" onClick={() => addLine()}/>
-                </aside>
+                ) : null}
 
-                <section className="space-y-3 rounded-md border border-border bg-card/70 p-3">
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[760px] text-xs">
-                      <thead>
-                        <tr className="grid items-center gap-3 grid-cols-[2fr_1fr_1fr_1fr_1fr_auto]">
-                          <th className="py-2 text-start text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
-                            {t("documents.form.designation")}
-                          </th>
-                          <th className="py-2 text-start text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
-                            {t("documents.details.unit")}
-                          </th>
-                          <th className="py-2 text-start text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
-                            {t("documents.details.qty")}
-                          </th>
-                          <th className="py-2 text-start text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
-                            {t("documents.details.unitPriceHT")}
-                          </th>
-                          <th className="py-2 text-start text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
-                            {t("documents.details.totalHT")}
-                          </th>
-                          <th className="py-2 text-end text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
-                            {t("common.delete")}
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-border">
-                        {lines.map((line) => (
-                          <tr key={line.id} className="grid items-center gap-3 grid-cols-[2fr_1fr_1fr_1fr_1fr_auto]">
-                            <td className=" py-2">
-                              <FormField
-                                type="text"
-                                value={line.values.designation || ""}
-                                list="saved-articles-list"
-                                onBlur={(value) => tryAutoFillArticle(line.id, value)}
-                                onChange={(value) => {
-                                  updateLine(line.id, "designation", value);
-                                  tryAutoFillArticle(line.id, value);
-                                }}
-                                placeholder={t("documents.form.designation")}
-                              />
-                            </td>
-                            <td className=" py-2">
-                              <FormField
-                                type="text"
-                                value={line.values.unite || defaultUnit}
-                                list="saved-units-list"
-                                placeholder={t("documents.form.unitPlaceholder")}
-                                onChange={(value) => updateLine(line.id, "unite", value)}
-                                onBlur={(value) => {
-                                  const normalized = normalizeUnitInput(value) || defaultUnit;
-                                  updateLine(line.id, "unite", normalized);
-                                  persistUnits([normalized], true);
-                                }}
-                              />
-                            </td>
-                            <td className=" py-2">
-                              <FormField
-                                type="number"
-                                value={line.values.qte || "1"}
-                                onChange={(value) => updateLine(line.id, "qte", value)}
-                                min="0"
-                                step="0.001"
-                              />
-                            </td>
-                            <td className=" py-2">
-                              <FormField
-                                type="number"
-                                value={line.values.pu || "0"}
-                                onChange={(value) => updateLine(line.id, "pu", value)}
-                                min="0"
-                                step="0.01"
-                              />
-                            </td>
-                            <td className=" py-2">
-                              <FormField type="number" value={line.values.pt || "0.00"} readOnly inputClassName="bg-background/40" />
-                            </td>
-                            <td className=" py-2 text-right">
-                              <UiButton type="button" size="sm" variant="danger" icon="remove" onClick={() => removeLine(line.id)}/>
-                            </td>
-                          </tr>
+                {step === "client" ? (
+                  <div className="grid h-full gap-4 overflow-y-auto pr-1 md:grid-cols-3 sm:pr-2">
+                    <div className="rounded-md border border-border bg-background/30 p-3 text-xs text-muted-foreground">
+                      {t("documents.form.selectedType")}
+                      <p className="mt-1 text-sm font-semibold text-foreground">{documentTypeLabel(type)}</p>
+                    </div>
+                    <FormField
+                      type="date"
+                      label={t("documents.form.issueDate")}
+                      value={issueDate}
+                      onChange={onIssueDateChange}
+                    />
+                    {requiresDueDate ? (
+                      <FormField
+                        type="date"
+                        label={t("documents.form.dueDate")}
+                        required
+                        value={dueDate}
+                        min={issueDate}
+                        onChange={onDueDateChange}
+                      />
+                    ) : (
+                      <div />
+                    )}
+                    <FormField
+                      type="text"
+                      label={t("documents.form.clientName")}
+                      required
+                      value={clientName}
+                      onChange={onClientNameChange}
+                      onBlur={syncClientFromLibrary}
+                      list="saved-clients-list"
+                      placeholder={t("documents.form.clientNamePlaceholder")}
+                      className="md:col-span-2"
+                    />
+                    <datalist id="saved-clients-list">
+                      {savedClients.map((client) => (
+                        <option key={client.id} value={client.name} />
+                      ))}
+                    </datalist>
+
+                    <FormField type="email" label={t("documents.form.clientEmail")} value={clientEmail} onChange={setClientEmail} placeholder={t("documents.form.clientEmailPlaceholder")} />
+                    <FormField type="text" label={t("documents.form.clientPhone")} required value={clientPhone} onChange={setClientPhone} placeholder={t("documents.form.clientPhonePlaceholder")} />
+                    <FormField type="text" label={t("documents.form.clientIce")} value={clientIce} onChange={setClientIce} placeholder={t("documents.form.clientIcePlaceholder")} />
+
+                    <FormField type="text" label={t("documents.form.clientIf")} value={clientIf} onChange={setClientIf} placeholder={t("documents.form.clientIfPlaceholder")} />
+                    <FormField
+                      type="text"
+                      label={t("documents.form.clientAddress")}
+                      required
+                      value={clientAddress}
+                      onChange={setClientAddress}
+                      placeholder={t("documents.form.clientAddressPlaceholder")}
+                      className="md:col-span-2"
+                    />
+                  </div>
+                ) : null}
+
+                {step === "articles" ? (
+                  <div className="grid h-full min-h-0 gap-3 xl:grid-cols-[minmax(0,1.3fr)_minmax(280px,0.7fr)]">
+                  <section className="flex min-h-0 flex-col rounded-xl border border-border bg-card/70 p-3">
+                    <div className="mb-3 flex items-center justify-between rounded-lg border border-border/70 bg-background/30 px-3 py-2">
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("documents.form.step3")}</p>
+                        <p className="text-xs text-muted-foreground">{t("documents.form.footerHint")}</p>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        <span className="text-[11px] text-muted-foreground">
+                          {t("documents.form.selectedCount").replace("{count}", String(selectedLinesCount))}
+                        </span>
+                        <UiButton type="button" size="xs" variant="ghost" onClick={toggleSelectAllLines}>
+                          {allLinesSelected ? t("documents.form.clearSelection") : t("documents.form.selectAll")}
+                        </UiButton>
+                        <UiButton type="button" size="xs" variant="outline" icon="export" disabled={!selectedLinesCount} onClick={exportSelectedLines}>
+                          {t("documents.form.exportSelected")}
+                        </UiButton>
+                        <UiButton type="button" size="xs" variant="danger" icon="remove" disabled={!selectedLinesCount} onClick={removeSelectedLines}>
+                          {t("documents.form.deleteSelected")}
+                        </UiButton>
+                        <UiButton type="button" size="sm" variant="outline" icon="plus" onClick={() => addLine()} />
+                      </div>
+                    </div>
+
+                    <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+                      {lines.map((line, index) => {
+                        const isSelected = selectedLineIds.includes(line.id);
+                        return (
+                        <div
+                          key={line.id}
+                          className={
+                            isSelected
+                              ? "rounded-lg border border-primary/50 bg-primary/5 p-2.5"
+                              : "rounded-lg border border-border bg-background/35 p-2.5"
+                          }
+                        >
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-border bg-background/60 px-2 py-1 text-[11px] text-muted-foreground">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() => toggleLineSelection(line.id)}
+                                  className="h-3.5 w-3.5 accent-primary"
+                                />
+                                <span>{t("documents.form.select")}</span>
+                              </label>
+                              <p className="shrink-0 rounded-md border border-border bg-background/70 px-2 py-1 text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+                                #{String(index + 1).padStart(2, "0")}
+                              </p>
+                            </div>
+                            <UiButton type="button" size="xs" variant="danger" iconOnly icon="remove" onClick={() => removeLine(line.id)} />
+                          </div>
+
+                            <div className="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
+                              {orderedLineColumns.map((column) => (
+                                <div key={column.id}>
+                                  {renderLineField(line, column)}
+                                </div>
+                              ))}
+                            </div>
+                        </div>
+                      )})}
+                    </div>
+
+                      <datalist id="saved-articles-list">
+                        {savedArticles.map((article) => (
+                          <option key={article.id} value={article.designation} />
                         ))}
-                      </tbody>
-                    </table>
-                    <datalist id="saved-articles-list">
-                      {savedArticles.map((article) => (
-                        <option key={article.id} value={article.designation} />
-                      ))}
-                    </datalist>
-                    <datalist id="saved-units-list">
-                      {baseUnitOptions.map((option) => (
-                        <option key={option.value} value={option.value} />
-                      ))}
-                    </datalist>
-                  </div>
+                      </datalist>
+                      <datalist id="saved-units-list">
+                        {baseUnitOptions.map((option) => (
+                          <option key={option.value} value={option.value} />
+                        ))}
+                      </datalist>
 
-                  <div className="ml-auto w-full rounded-md border border-border bg-background/30 p-3 text-xs md:max-w-sm">
-                    <div className="flex items-center justify-between py-1">
-                      <span className="text-muted-foreground">{t("documents.form.subtotalHT")}</span>
-                      <span className="font-semibold text-foreground">{subtotalHT.toFixed(2)} MAD</span>
-                    </div>
-                    <div className="flex items-center justify-between py-1">
-                      <span className="text-muted-foreground">{t("documents.form.tva").replace("{rate}", tvaRate.toFixed(2))}</span>
-                      <span className="font-semibold text-foreground">{totalTax.toFixed(2)} MAD</span>
-                    </div>
-                    <div className="mt-1 flex items-center justify-between border-t border-border pt-2">
-                      <span className="text-muted-foreground">{t("documents.form.totalTTC")}</span>
-                      <span className="text-sm font-semibold text-primary">{totalTTC.toFixed(2)} MAD</span>
-                    </div>
+                      <div className="mt-3 ml-auto w-full rounded-lg border border-border bg-background/40 p-3 text-xs md:max-w-md">
+                        <div className="flex items-center justify-between py-1">
+                          <span className="text-muted-foreground">{t("documents.form.subtotalHT")}</span>
+                          <span className="font-semibold text-foreground">{subtotalHT.toFixed(2)} MAD</span>
+                        </div>
+                        <div className="flex items-center justify-between py-1">
+                          <span className="text-muted-foreground">{t("documents.form.tva").replace("{rate}", tvaRate.toFixed(2))}</span>
+                          <span className="font-semibold text-foreground">{totalTax.toFixed(2)} MAD</span>
+                        </div>
+                        <div className="mt-1 flex items-center justify-between border-t border-border pt-2">
+                          <span className="text-muted-foreground">{t("documents.form.totalTTC")}</span>
+                          <span className="text-sm font-semibold text-primary">{totalTTC.toFixed(2)} MAD</span>
+                        </div>
+                      </div>
+                    </section>
+
+                    <aside className="flex min-h-0 flex-col rounded-xl border border-border bg-background/20 p-3">
+                      <p className="mb-2 text-xs text-muted-foreground">{t("documents.form.posPicker")}</p>
+                      <FormField
+                        type="text"
+                        value={articleQuery}
+                        onChange={setArticleQuery}
+                        placeholder={t("documents.form.searchArticles")}
+                      />
+                      <div className="mt-2 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+                        {suggestedArticles.map((article) => (
+                          <button
+                            key={article.id}
+                            type="button"
+                            onClick={() => addLineFromArticle(article)}
+                            className="w-full rounded-lg border border-border bg-background/50 px-3 py-2 text-left text-xs text-muted-foreground transition hover:border-primary/30 hover:text-foreground"
+                            title={article.designation}
+                          >
+                            <p className="line-clamp-2 break-words text-[12px] font-semibold leading-snug text-foreground">{article.designation}</p>
+                            <p className="mt-1 break-words leading-snug">
+                              {t("documents.form.articleHint").replace("{pu}", article.values.pu || "0.00").replace("{unit}", article.values.unite || defaultUnit)}
+                            </p>
+                          </button>
+                        ))}
+                        {suggestedArticles.length === 0 ? (
+                          <p className="rounded-lg border border-border bg-background/50 px-3 py-2 text-xs text-muted-foreground">{t("documents.form.noArticleMatch")}</p>
+                        ) : null}
+                      </div>
+                    </aside>
                   </div>
-                </section>
+                ) : null}
               </div>
-            ) : null}
+            </div>
+            
 
-            <div className="mt-5 flex items-center justify-between rounded-md border border-border bg-background/30 px-3 py-2 text-[11px] text-muted-foreground">
-              <span>
+            <div className="mt-5 flex flex-col gap-2 rounded-md border border-border bg-background/30 px-3 py-2 text-[11px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+              <span className="min-w-0">
                 {t("documents.form.footerHint")}
               </span>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {step === "client" ? (
                   <UiButton type="button" size="sm" variant="ghost" onClick={() => setStep("type")}>
                     {t("documents.form.back")}
@@ -1043,6 +1259,7 @@ export function NewDocumentModal({
                 ) : null}
               </div>
             </div>
+
           </div>
         </div>
       ) : null}

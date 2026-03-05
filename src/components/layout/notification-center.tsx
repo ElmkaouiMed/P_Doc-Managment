@@ -16,6 +16,7 @@ type NotificationFeedItem = {
   type: string;
   title: string;
   body: string;
+  metadata?: Record<string, unknown> | null;
   actionPath: string | null;
   createdAt: string;
   isRead: boolean;
@@ -30,6 +31,17 @@ function dateTimeLabel(input: string, locale: "fr" | "en" | "ar") {
   return new Intl.DateTimeFormat(intlLocale, {
     dateStyle: "short",
     timeStyle: "short",
+  }).format(value);
+}
+
+function dateLabel(input: string, locale: "fr" | "en" | "ar") {
+  const value = new Date(input);
+  if (Number.isNaN(value.getTime())) {
+    return input;
+  }
+  const intlLocale = locale === "ar" ? "ar-MA" : locale === "en" ? "en-US" : "fr-MA";
+  return new Intl.DateTimeFormat(intlLocale, {
+    dateStyle: "short",
   }).format(value);
 }
 
@@ -58,6 +70,105 @@ function notificationTitle(type: string, fallback: string, t: (key: string) => s
   }
   const translated = t(key);
   return translated === key ? fallback || translated : translated;
+}
+
+function toText(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function toInt(value: unknown) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  return Math.trunc(parsed);
+}
+
+function statusLabel(status: string, t: (key: string) => string) {
+  const normalized = status.trim().toUpperCase();
+  if (!normalized || normalized === "START") {
+    return t("documents.details.start");
+  }
+  const keyMap: Record<string, string> = {
+    DRAFT: "documents.status.draft",
+    ISSUED: "documents.status.issued",
+    SENT: "documents.status.sent",
+    PAID: "documents.status.paid",
+    OVERDUE: "documents.status.overdue",
+    CANCELLED: "documents.status.cancelled",
+  };
+  const key = keyMap[normalized];
+  if (!key) {
+    return normalized;
+  }
+  return t(key);
+}
+
+function notificationBody(item: NotificationFeedItem, locale: "fr" | "en" | "ar", t: (key: string) => string) {
+  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : null;
+  if (!metadata) {
+    return item.body || t("notifications.body.fallback");
+  }
+
+  const number = toText(metadata.documentNumber) || "-";
+  const client = toText(metadata.clientName) || t("documents.clientFallback");
+
+  if (item.type === "DUE_SOON") {
+    const days = toInt(metadata.daysUntilDue);
+    const dueDate = toText(metadata.dueDate);
+    const dueDateLabel = dueDate ? dateLabel(dueDate, locale) : "-";
+    if (days <= 0) {
+      return t("notifications.body.dueToday")
+        .replace("{number}", number)
+        .replace("{client}", client)
+        .replace("{date}", dueDateLabel);
+    }
+    return t("notifications.body.dueInDays")
+      .replace("{number}", number)
+      .replace("{client}", client)
+      .replace("{days}", String(days))
+      .replace("{date}", dueDateLabel);
+  }
+
+  if (item.type === "OVERDUE") {
+    const dueDate = toText(metadata.dueDate);
+    const dueDateLabel = dueDate ? dateLabel(dueDate, locale) : "-";
+    return t("notifications.body.overdue")
+      .replace("{number}", number)
+      .replace("{client}", client)
+      .replace("{days}", String(toInt(metadata.daysOverdue)))
+      .replace("{date}", dueDateLabel);
+  }
+
+  if (item.type === "DRAFT_STALE") {
+    return t("notifications.body.draftStale")
+      .replace("{number}", number)
+      .replace("{client}", client)
+      .replace("{days}", String(toInt(metadata.daysStale)));
+  }
+
+  if (item.type === "STATUS_CHANGED") {
+    const fromStatus = statusLabel(toText(metadata.fromStatus), t);
+    const toStatus = statusLabel(toText(metadata.toStatus), t);
+    return t("notifications.body.statusChanged")
+      .replace("{number}", number)
+      .replace("{from}", fromStatus)
+      .replace("{to}", toStatus);
+  }
+
+  if (item.type === "EMAIL_FAILED") {
+    return t("notifications.body.emailFailed")
+      .replace("{number}", number)
+      .replace("{message}", toText(metadata.message) || item.body || "-");
+  }
+
+  if (item.type === "EXPORT_FAILED") {
+    return t("notifications.body.exportFailed")
+      .replace("{number}", number)
+      .replace("{message}", toText(metadata.message) || item.body || "-");
+  }
+
+  return item.body || t("notifications.body.fallback");
 }
 
 export function NotificationCenter() {
@@ -209,7 +320,7 @@ export function NotificationCenter() {
                       {dateTimeLabel(item.createdAt, locale)}
                     </span>
                   </div>
-                  <p className="mt-1 text-xs text-muted-foreground">{item.body || "-"}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{notificationBody(item, locale, t)}</p>
                 </button>
               ))
             ) : (

@@ -2,7 +2,6 @@
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 
-import { getGeneralInfoSettings, STORE_EVENTS } from "@/features/documents/lib/workspace-store";
 import { APP_LOCALE_COOKIE } from "@/i18n/constants";
 import { AppLocale, messages, SUPPORTED_LOCALES } from "@/i18n/messages";
 
@@ -38,14 +37,6 @@ function readLocaleFromCookie(): AppLocale | null {
   return isLocale(value) ? value : null;
 }
 
-function readLocaleFromSettings(): AppLocale {
-  const value = getGeneralInfoSettings().language;
-  if (isLocale(value)) {
-    return value;
-  }
-  return "fr";
-}
-
 type I18nProviderProps = {
   children: React.ReactNode;
   initialLocale?: AppLocale;
@@ -56,13 +47,12 @@ export function I18nProvider({ children, initialLocale = "fr" }: I18nProviderPro
 
   useEffect(() => {
     const apply = () => {
-      const fromSettings = readLocaleFromSettings();
       const fromCookie = readLocaleFromCookie();
-      setLocale(fromCookie || fromSettings || initialLocale);
+      setLocale(fromCookie || initialLocale);
     };
     apply();
-    window.addEventListener(STORE_EVENTS.generalInfoUpdated, apply);
-    return () => window.removeEventListener(STORE_EVENTS.generalInfoUpdated, apply);
+    window.addEventListener("doc-v1-general-info-updated", apply);
+    return () => window.removeEventListener("doc-v1-general-info-updated", apply);
   }, [initialLocale]);
 
   useEffect(() => {

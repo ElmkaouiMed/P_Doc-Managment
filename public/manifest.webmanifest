@@ -1,0 +1,22 @@
+{
+  "name": "DOC_v1 Admin",
+  "short_name": "DOC_v1",
+  "description": "Documents-first multi-tenant platform",
+  "lang": "fr",
+  "dir": "auto",
+  "id": "/",
+  "scope": "/",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "any",
+      "type": "image/x-icon",
+      "purpose": "any maskable"
+    }
+  ]
+}
+

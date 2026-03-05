@@ -20,21 +20,7 @@ import {
   ExportFormatOption,
   ExportSettings,
   GeneralInfoSettings,
-  getBusinessConfig,
-  getEmailConfigSettings,
-  getEmailTemplateSettings,
-  getExportSettings,
-  getGeneralInfoSettings,
-  listDocumentUnits,
-  listEnabledDocumentTypes,
-  listTemplateColumns,
-  saveBusinessConfig,
-  saveEmailConfigSettings,
-  saveEmailTemplateSettings,
-  saveExportSettings,
-  saveGeneralInfoSettings,
-  saveDocumentUnits,
-  saveTemplateColumns,
+  emitWorkspaceEvent,
   STORE_EVENTS,
   TemplateLineColumn,
 } from "@/features/documents/lib/workspace-store";
@@ -50,7 +36,23 @@ import {
   uploadTemplateAssetAction,
   type TemplateAssetRow,
 } from "@/features/templates/actions";
-import { getCompanyEmailConfigAction, saveCompanyEmailConfigAction } from "@/features/settings/actions";
+import {
+  getCompanyBusinessConfigAction,
+  getCompanyDocumentUnitsAction,
+  getCompanyEmailConfigAction,
+  getCompanyEmailTemplatesAction,
+  getCompanyExportSettingsAction,
+  getCompanyGeneralInfoAction,
+  getCompanyTemplateColumnsAction,
+  saveCompanyBusinessConfigAction,
+  saveCompanyDocumentUnitsAction,
+  saveCompanyEmailConfigAction,
+  saveCompanyEmailTemplatesAction,
+  saveCompanyExportSettingsAction,
+  saveCompanyGeneralInfoAction,
+  saveCompanyTemplateColumnsAction,
+} from "@/features/settings/actions";
+import { APP_LOCALE_COOKIE } from "@/i18n/constants";
 import { useI18n } from "@/i18n/provider";
 import { cn } from "@/lib/utils";
 
@@ -117,7 +119,11 @@ const DOCUMENT_TYPE_I18N_KEYS: Record<DocumentType, string> = {
   EXTRACT_BON_COMMANDE_PUBLIC: "documents.types.extractBonCommandePublic",
 };
 
-const TEMPLATE_VARIABLE_GROUPS = [
+const CONFIGURABLE_DOCUMENT_TYPES: DocumentType[] = DOCUMENT_TYPE_OPTIONS.filter(
+  (documentType) => documentType !== "EXTRACT_DEVIS" && documentType !== "EXTRACT_BON_COMMANDE_PUBLIC",
+);
+
+const TEMPLATE_VARIABLE_BASE_GROUPS = [
   {
     labelKey: "settings.templates.files.variables.groups.client",
     values: ["client.name", "client.email", "client.phone", "client.address", "client.ice", "client.if_number"],
@@ -134,11 +140,42 @@ const TEMPLATE_VARIABLE_GROUPS = [
     labelKey: "settings.templates.files.variables.groups.company",
     values: ["company.legal_name", "company.ice", "company.if_number", "company.address", "company.phone_fix", "company.bank"],
   },
-  {
-    labelKey: "settings.templates.files.variables.groups.lines",
-    values: ["line.designation", "line.unit", "line.quantity", "line.unit_price_ht", "line.total_ht", "line.total_ttc"],
-  },
 ] as const;
+
+function lineVariableNamesFromColumns(columns: TemplateLineColumn[]) {
+  const output = [
+    "line.designation",
+    "line.unit",
+    "line.quantity",
+    "line.unit_price_ht",
+    "line.total_ht",
+    "line.total_ttc",
+    "line.vat_rate",
+    "line.sku",
+    "line.description",
+  ];
+
+  for (const column of columns) {
+    if (!column.enabled) {
+      continue;
+    }
+    output.push(`line.${column.id}`);
+    if (column.id === "unite") {
+      output.push("line.unit");
+    }
+    if (column.id === "qte") {
+      output.push("line.quantity");
+    }
+    if (column.id === "pu") {
+      output.push("line.unit_price_ht");
+    }
+    if (column.id === "pt") {
+      output.push("line.total_ht");
+    }
+  }
+
+  return Array.from(new Set(output));
+}
 
 const DOCX_TABLE_ROW_SNIPPET = `DOCX safe pattern (use 3 rows):
 Row A (control row, first cell only): {%tr for row in lines %}
@@ -174,18 +211,28 @@ function ConfigTab() {
   const { success, error } = useToast();
   const { t } = useI18n();
   const documentTypeLabel = (documentType: DocumentType) => t(DOCUMENT_TYPE_I18N_KEYS[documentType] || "documents.types.devis");
-  const [enabledTypes, setEnabledTypes] = useState<DocumentType[]>(() => listEnabledDocumentTypes());
-  const [defaultTvaRate, setDefaultTvaRate] = useState(() => String(getBusinessConfig().defaultTvaRate));
+  const [enabledTypes, setEnabledTypes] = useState<DocumentType[]>(() => [...CONFIGURABLE_DOCUMENT_TYPES]);
+  const [defaultTvaRate, setDefaultTvaRate] = useState("20");
+  const [autoFillArticleUnitPrice, setAutoFillArticleUnitPrice] = useState(true);
 
   useEffect(() => {
-    const sync = () => {
-      const config = getBusinessConfig();
-      setEnabledTypes(config.enabledDocumentTypes);
-      setDefaultTvaRate(String(config.defaultTvaRate));
+    let mounted = true;
+    void getCompanyBusinessConfigAction()
+      .then((result) => {
+        if (!mounted || !result.ok) {
+          return;
+        }
+        setEnabledTypes(result.config.enabledDocumentTypes);
+        setDefaultTvaRate(String(result.config.defaultTvaRate));
+        setAutoFillArticleUnitPrice(result.config.autoFillArticleUnitPrice);
+      })
+      .catch(() => {
+        error(t("settings.config.toasts.loadFailed"));
+      });
+    return () => {
+      mounted = false;
     };
-    window.addEventListener(STORE_EVENTS.businessConfigUpdated, sync);
-    return () => window.removeEventListener(STORE_EVENTS.businessConfigUpdated, sync);
-  }, []);
+  }, [error, t]);
 
   const toggleType = (documentType: DocumentType) => {
     setEnabledTypes((current) => {
@@ -200,16 +247,26 @@ function ConfigTab() {
     });
   };
 
-  const saveConfig = () => {
+  const saveConfig = async () => {
     const parsedTva = Number.parseFloat(defaultTvaRate || "0");
     if (!Number.isFinite(parsedTva) || parsedTva < 0 || parsedTva > 100) {
       error(t("settings.config.toasts.invalidTva"), t("settings.config.toasts.invalidTvaHint"));
       return;
     }
-    saveBusinessConfig({
+    const nextConfig = {
       enabledDocumentTypes: enabledTypes,
       defaultTvaRate: parsedTva,
-    });
+      autoFillArticleUnitPrice,
+    };
+    const result = await saveCompanyBusinessConfigAction(nextConfig);
+    if (!result.ok) {
+      error(t("settings.config.toasts.saveFailed"));
+      return;
+    }
+    setEnabledTypes(result.config.enabledDocumentTypes);
+    setDefaultTvaRate(String(result.config.defaultTvaRate));
+    setAutoFillArticleUnitPrice(result.config.autoFillArticleUnitPrice);
+    emitWorkspaceEvent(STORE_EVENTS.businessConfigUpdated);
     success(t("settings.config.toasts.saved"), t("settings.config.toasts.savedHint"));
   };
 
@@ -221,7 +278,7 @@ function ConfigTab() {
           {t("settings.config.subtitle")}
         </p>
         <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-          {DOCUMENT_TYPE_OPTIONS.map((documentType) => {
+          {CONFIGURABLE_DOCUMENT_TYPES.map((documentType) => {
             const enabled = enabledTypes.includes(documentType);
             return (
               <button
@@ -251,6 +308,13 @@ function ConfigTab() {
           step="0.01"
           onChange={setDefaultTvaRate}
         />
+        <FormField
+          type="checkbox"
+          label={t("settings.config.autoFillArticlePrice")}
+          checked={autoFillArticleUnitPrice}
+          onCheckedChange={setAutoFillArticleUnitPrice}
+        />
+        <p className="text-[11px] text-muted-foreground">{t("settings.config.autoFillArticlePriceHint")}</p>
       </div>
 
       <div className="flex items-center justify-between rounded-md border border-border bg-background/30 px-3 py-2">
@@ -264,25 +328,63 @@ function ConfigTab() {
 }
 
 function GeneralInfoTab() {
-  const { success } = useToast();
+  const { success, error } = useToast();
   const { t } = useI18n();
-  const [values, setValues] = useState<GeneralInfoSettings>(() => getGeneralInfoSettings());
+  const [values, setValues] = useState<GeneralInfoSettings>({
+    legalName: "",
+    ice: "",
+    ifNumber: "",
+    phoneFix: "",
+    address: "",
+    bank: "",
+    language: "fr",
+  });
 
   useEffect(() => {
-    const sync = () => setValues(getGeneralInfoSettings());
-    window.addEventListener(STORE_EVENTS.generalInfoUpdated, sync);
-    return () => window.removeEventListener(STORE_EVENTS.generalInfoUpdated, sync);
-  }, []);
+    let mounted = true;
+    void getCompanyGeneralInfoAction()
+      .then((result) => {
+        if (!mounted || !result.ok) {
+          return;
+        }
+        const next = result.settings as GeneralInfoSettings;
+        setValues(next);
+        if (typeof document !== "undefined") {
+          document.cookie = `${APP_LOCALE_COOKIE}=${next.language}; path=/; max-age=31536000; SameSite=Lax`;
+        }
+        emitWorkspaceEvent(STORE_EVENTS.generalInfoUpdated);
+      })
+      .catch(() => {
+        error(t("settings.general.toasts.loadFailed"));
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [error, t]);
 
   const updateValue = (key: keyof GeneralInfoSettings, value: string) => {
     setValues((current) => ({ ...current, [key]: value } as GeneralInfoSettings));
     if (key === "language" && (value === "fr" || value === "en" || value === "ar")) {
-      saveGeneralInfoSettings({ language: value });
+      if (typeof document !== "undefined") {
+        document.cookie = `${APP_LOCALE_COOKIE}=${value}; path=/; max-age=31536000; SameSite=Lax`;
+      }
+      emitWorkspaceEvent(STORE_EVENTS.generalInfoUpdated);
+      void saveCompanyGeneralInfoAction({ language: value });
     }
   };
 
-  const saveChanges = () => {
-    saveGeneralInfoSettings(values);
+  const saveChanges = async () => {
+    const result = await saveCompanyGeneralInfoAction(values);
+    if (!result.ok) {
+      error(t("settings.general.toasts.saveFailed"));
+      return;
+    }
+    const next = result.settings as GeneralInfoSettings;
+    setValues(next);
+    if (typeof document !== "undefined") {
+      document.cookie = `${APP_LOCALE_COOKIE}=${next.language}; path=/; max-age=31536000; SameSite=Lax`;
+    }
+    emitWorkspaceEvent(STORE_EVENTS.generalInfoUpdated);
     success(t("settings.general.toasts.saved"));
   };
 
@@ -321,40 +423,50 @@ function EmailTab() {
   const { success, error } = useToast();
   const { t } = useI18n();
   const documentTypeLabel = (documentType: DocumentType) => t(DOCUMENT_TYPE_I18N_KEYS[documentType] || "documents.types.devis");
-  const [values, setValues] = useState<EmailConfigSettings>(() => getEmailConfigSettings());
+  const [values, setValues] = useState<EmailConfigSettings>({
+    mode: "gmail",
+    smtpHost: "smtp.gmail.com",
+    smtpPort: "587",
+    smtpUser: "",
+    smtpPassword: "",
+    senderName: "",
+    senderEmail: "",
+  });
   const [emailSubTab, setEmailSubTab] = useState<"config" | "templates">("config");
   const [templateType, setTemplateType] = useState<DocumentType>("DEVIS");
-  const [templates, setTemplates] = useState<EmailTemplateSettings>(() => getEmailTemplateSettings());
+  const [templates, setTemplates] = useState<EmailTemplateSettings>(() => {
+    const output = {} as EmailTemplateSettings;
+    for (const documentType of DOCUMENT_TYPE_OPTIONS) {
+      output[documentType] = {
+        enabled: true,
+        autoSendOnCreate: false,
+        subject: "",
+        body: "",
+      };
+    }
+    return output;
+  });
 
   useEffect(() => {
     let mounted = true;
-    const sync = () => setValues(getEmailConfigSettings());
-    window.addEventListener(STORE_EVENTS.emailConfigUpdated, sync);
-    void getCompanyEmailConfigAction()
-      .then((result) => {
-        if (!mounted || !result.ok) {
+    void Promise.all([getCompanyEmailConfigAction(), getCompanyEmailTemplatesAction()])
+      .then(([configResult, templatesResult]) => {
+        if (!mounted) {
           return;
         }
-        const local = getEmailConfigSettings();
-        const localLooksEmpty = !local.smtpUser && !local.smtpPassword && !local.senderEmail && !local.senderName;
-        if (result.hasStored || localLooksEmpty) {
-          setValues(result.config as EmailConfigSettings);
-          saveEmailConfigSettings(result.config as EmailConfigSettings);
+        if (configResult.ok) {
+          setValues(configResult.config as EmailConfigSettings);
+        }
+        if (templatesResult.ok) {
+          setTemplates(templatesResult.templates as EmailTemplateSettings);
         }
       })
       .catch(() => {
-        // Keep local settings when server config can't be loaded.
+        // Keep default settings when server load fails.
       });
     return () => {
       mounted = false;
-      window.removeEventListener(STORE_EVENTS.emailConfigUpdated, sync);
     };
-  }, []);
-
-  useEffect(() => {
-    const syncTemplates = () => setTemplates(getEmailTemplateSettings());
-    window.addEventListener(STORE_EVENTS.emailTemplatesUpdated, syncTemplates);
-    return () => window.removeEventListener(STORE_EVENTS.emailTemplatesUpdated, syncTemplates);
   }, []);
 
   const updateValue = (key: keyof EmailConfigSettings, value: string) => {
@@ -382,18 +494,22 @@ function EmailTab() {
   };
 
   const saveChanges = async () => {
-    saveEmailConfigSettings(values);
     try {
-      const result = await saveCompanyEmailConfigAction(values);
-      if (!result.ok) {
+      const [configResult, templatesResult] = await Promise.all([
+        saveCompanyEmailConfigAction(values),
+        saveCompanyEmailTemplatesAction(templates),
+      ]);
+      if (!configResult.ok || !templatesResult.ok) {
         error(t("settings.emails.toasts.saveFailed"));
         return;
       }
+      setTemplates(templatesResult.templates as EmailTemplateSettings);
+      emitWorkspaceEvent(STORE_EVENTS.emailConfigUpdated);
+      emitWorkspaceEvent(STORE_EVENTS.emailTemplatesUpdated);
     } catch {
       error(t("settings.emails.toasts.saveFailed"));
       return;
     }
-    saveEmailTemplateSettings(templates);
     success(t("settings.emails.toasts.saved"));
   };
 
@@ -607,8 +723,14 @@ function TemplatesTab() {
   const documentTypeLabel = (documentType: DocumentType) => t(DOCUMENT_TYPE_I18N_KEYS[documentType] || "documents.types.devis");
   const [innerTab, setInnerTab] = useState<"files" | "columns" | "units">("files");
   const [documentType, setDocumentType] = useState<DocumentType>("DEVIS");
-  const [columns, setColumns] = useState<TemplateLineColumn[]>(() => listTemplateColumns("DEVIS"));
-  const [units, setUnits] = useState<string[]>(() => listDocumentUnits());
+  const [columns, setColumns] = useState<TemplateLineColumn[]>([
+    { id: "designation", label: "Designation", dataType: "text", required: true, enabled: true, system: true },
+    { id: "unite", label: "Unite", dataType: "unit", required: false, enabled: true, system: true },
+    { id: "qte", label: "Qte", dataType: "number", required: true, enabled: true, system: true },
+    { id: "pu", label: "P.U HT", dataType: "currency", required: true, enabled: true, system: true },
+    { id: "pt", label: "P.T HT", dataType: "currency", required: false, enabled: true, system: true },
+  ]);
+  const [units, setUnits] = useState<string[]>(["u", "kg", "m", "m2", "m3", "h", "jour", "forfait"]);
   const [newUnit, setNewUnit] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [newType, setNewType] = useState<ColumnDataType>("text");
@@ -626,20 +748,38 @@ function TemplatesTab() {
   const templateFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    setColumns(listTemplateColumns(documentType));
-  }, [documentType]);
+    let mounted = true;
+    void getCompanyTemplateColumnsAction(documentType)
+      .then((result) => {
+        if (!mounted || !result.ok) {
+          return;
+        }
+        setColumns(result.columns as TemplateLineColumn[]);
+      })
+      .catch(() => {
+        error(t("settings.templates.toasts.loadFailed"));
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [documentType, error, t]);
 
   useEffect(() => {
-    const refresh = () => setColumns(listTemplateColumns(documentType));
-    window.addEventListener(STORE_EVENTS.templateColumnsUpdated, refresh);
-    return () => window.removeEventListener(STORE_EVENTS.templateColumnsUpdated, refresh);
-  }, [documentType]);
-
-  useEffect(() => {
-    const refreshUnits = () => setUnits(listDocumentUnits());
-    window.addEventListener(STORE_EVENTS.unitsUpdated, refreshUnits);
-    return () => window.removeEventListener(STORE_EVENTS.unitsUpdated, refreshUnits);
-  }, []);
+    let mounted = true;
+    void getCompanyDocumentUnitsAction()
+      .then((result) => {
+        if (!mounted || !result.ok) {
+          return;
+        }
+        setUnits(result.units);
+      })
+      .catch(() => {
+        error(t("settings.templates.toasts.unitsLoadFailed"));
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [error, t]);
 
   useEffect(() => {
     if (innerTab !== "files") {
@@ -672,6 +812,16 @@ function TemplatesTab() {
           .filter((item) => item.length > 0),
       ),
     [templateVariables],
+  );
+  const templateVariableGroups = useMemo(
+    () => [
+      ...TEMPLATE_VARIABLE_BASE_GROUPS,
+      {
+        labelKey: "settings.templates.files.variables.groups.lines",
+        values: lineVariableNamesFromColumns(columns),
+      },
+    ],
+    [columns],
   );
 
   const updateColumn = (columnId: string, patch: Partial<TemplateLineColumn>) => {
@@ -729,8 +879,17 @@ function TemplatesTab() {
     success(t("settings.templates.toasts.columnAdded"));
   };
 
-  const saveColumns = () => {
-    saveTemplateColumns(documentType, columns);
+  const saveColumns = async () => {
+    const result = await saveCompanyTemplateColumnsAction({
+      documentType,
+      columns,
+    });
+    if (!result.ok) {
+      error(t("settings.templates.toasts.saveFailed"));
+      return;
+    }
+    setColumns(result.columns as TemplateLineColumn[]);
+    emitWorkspaceEvent(STORE_EVENTS.templateColumnsUpdated);
     success(t("settings.templates.toasts.columnsSaved"), t("settings.templates.toasts.columnsSavedHint").replace("{type}", documentTypeLabel(documentType)));
   };
 
@@ -758,9 +917,15 @@ function TemplatesTab() {
     info(t("settings.templates.toasts.unitRemoved"));
   };
 
-  const saveUnits = () => {
-    saveDocumentUnits(units);
-    success(t("settings.templates.toasts.unitsSaved"), t("settings.templates.toasts.unitsSavedHint").replace("{count}", String(units.length)));
+  const saveUnits = async () => {
+    const result = await saveCompanyDocumentUnitsAction(units);
+    if (!result.ok) {
+      error(t("settings.templates.toasts.unitsSaveFailed"));
+      return;
+    }
+    setUnits(result.units);
+    emitWorkspaceEvent(STORE_EVENTS.unitsUpdated);
+    success(t("settings.templates.toasts.unitsSaved"), t("settings.templates.toasts.unitsSavedHint").replace("{count}", String(result.units.length)));
   };
 
   const bytesLabel = (value: number) => {
@@ -1017,7 +1182,7 @@ function TemplatesTab() {
                   {t("settings.templates.files.clearVariables")}
                 </UiButton>
               </div>
-              {TEMPLATE_VARIABLE_GROUPS.map((group) => (
+              {templateVariableGroups.map((group) => (
                 <div key={group.labelKey} className="space-y-1">
                   <p className="text-[11px] font-semibold text-foreground">{t(group.labelKey)}</p>
                   <div className="flex flex-wrap gap-2">
@@ -1437,13 +1602,29 @@ function NotificationsTab() {
 function ExportsTab() {
   const { success, error } = useToast();
   const { t } = useI18n();
-  const [values, setValues] = useState<ExportSettings>(() => getExportSettings());
+  const [values, setValues] = useState<ExportSettings>({
+    enabledFormats: ["PDF", "DOCX", "XLSX"],
+    defaultFormat: "PDF",
+    outputFolder: "exports",
+    includeAttachments: false,
+  });
 
   useEffect(() => {
-    const sync = () => setValues(getExportSettings());
-    window.addEventListener(STORE_EVENTS.exportsUpdated, sync);
-    return () => window.removeEventListener(STORE_EVENTS.exportsUpdated, sync);
-  }, []);
+    let mounted = true;
+    void getCompanyExportSettingsAction()
+      .then((result) => {
+        if (!mounted || !result.ok) {
+          return;
+        }
+        setValues(result.settings as ExportSettings);
+      })
+      .catch(() => {
+        error(t("settings.exports.toasts.loadFailed"));
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [error, t]);
 
   const toggleFormat = (format: ExportFormatOption) => {
     setValues((current) => {
@@ -1460,12 +1641,18 @@ function ExportsTab() {
     });
   };
 
-  const saveChanges = () => {
+  const saveChanges = async () => {
     if (!values.enabledFormats.length) {
       error(t("settings.exports.toasts.oneFormatRequired"));
       return;
     }
-    saveExportSettings(values);
+    const result = await saveCompanyExportSettingsAction(values);
+    if (!result.ok) {
+      error(t("settings.exports.toasts.saveFailed"));
+      return;
+    }
+    setValues(result.settings as ExportSettings);
+    emitWorkspaceEvent(STORE_EVENTS.exportsUpdated);
     success(t("settings.exports.toasts.saved"));
   };
 

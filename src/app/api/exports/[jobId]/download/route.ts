@@ -68,7 +68,7 @@ export async function GET(
   }
 
   const fileName = path.basename(absolutePath);
-  return new NextResponse(bytes, {
+  return new NextResponse(new Uint8Array(bytes), {
     status: 200,
     headers: {
       "Content-Type": detectMimeType(fileName),

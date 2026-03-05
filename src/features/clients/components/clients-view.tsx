@@ -11,6 +11,7 @@ import { useMsgBox } from "@/components/ui/msg-box";
 import { useToast } from "@/components/ui/toast";
 import { UiButton } from "@/components/ui/ui-button";
 import { deleteClientAction, updateClientAction } from "@/features/clients/actions";
+import { getCompanyViewPreferenceAction, saveCompanyViewPreferenceAction } from "@/features/settings/actions";
 import { useI18n } from "@/i18n/provider";
 
 type ClientViewMode = "table" | "grid";
@@ -41,8 +42,6 @@ type ClientsViewProps = {
   clients: ClientRow[];
 };
 
-const VIEW_KEY = "clients-view-mode";
-
 export function ClientsView({ clients }: ClientsViewProps) {
   const { success, error } = useToast();
   const { t } = useI18n();
@@ -69,13 +68,22 @@ export function ClientsView({ clients }: ClientsViewProps) {
   });
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      const stored = window.localStorage.getItem(VIEW_KEY);
-      if (stored === "grid") {
-        setViewMode("grid");
-      }
-    }, 0);
-    return () => window.clearTimeout(timer);
+    let mounted = true;
+    void getCompanyViewPreferenceAction("clients")
+      .then((result) => {
+        if (!mounted || !result.ok) {
+          return;
+        }
+        if (result.mode === "grid" || result.mode === "table") {
+          setViewMode(result.mode);
+        }
+      })
+      .catch(() => {
+        // Keep default view mode when preference load fails.
+      });
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -84,9 +92,9 @@ export function ClientsView({ clients }: ClientsViewProps) {
 
   const setMode = (mode: ClientViewMode) => {
     setViewMode(mode);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(VIEW_KEY, mode);
-    }
+    void saveCompanyViewPreferenceAction({ scope: "clients", mode }).catch(() => {
+      // Keep UI mode if DB save fails.
+    });
   };
 
   const filtered = useMemo(() => {
