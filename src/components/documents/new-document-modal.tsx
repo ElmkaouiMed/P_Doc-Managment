@@ -1101,7 +1101,7 @@ export function NewDocumentModal({
       ) : null}
       {isOpen ? (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-3 sm:p-4">
-          <div className="flex min-h-0 max-h-[86vh] w-full max-w-7xl flex-col overflow-hidden rounded-xl border border-border bg-card p-3 shadow-2xl shadow-black/50 sm:p-4">
+          <div className="flex min-h-0 max-h-[80vh] w-full max-w-7xl flex-col overflow-hidden rounded-xl border border-border bg-card p-3 shadow-2xl shadow-black/50 sm:p-4">
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <p className="text-xs uppercase tracking-[0.4em] text-muted-foreground">{t("documents.form.documentTag")}</p>

@@ -1,6 +1,6 @@
 "use server";
 
-import { requireAuthContext } from "@/features/auth/lib/session";
+import { getCompanyWriteAccessError, requireAuthContext } from "@/features/auth/lib/session";
 import { NotificationConfigInput } from "@/features/notifications/config";
 import {
   getCompanyNotificationConfig,
@@ -27,6 +27,10 @@ export async function getCompanyNotificationConfigAction() {
 
 export async function saveCompanyNotificationConfigAction(input: Partial<NotificationConfigInput>) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const config = await saveCompanyNotificationConfig(auth.company.id, input);
   return { ok: true as const, config };
 }

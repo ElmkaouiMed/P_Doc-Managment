@@ -3,7 +3,7 @@
 import path from "path";
 
 import { prisma } from "@/lib/db";
-import { requireAuthContext } from "@/features/auth/lib/session";
+import { getCompanyWriteAccessError, requireAuthContext } from "@/features/auth/lib/session";
 
 type DeleteProductInput = {
   productId: string;
@@ -255,6 +255,10 @@ async function parseProductCatalogFile(fileBuffer: Buffer) {
 
 export async function updateProductAction(input: UpdateProductInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const productId = input.productId.trim();
   if (!productId) {
     return { ok: false as const, error: "Product id is required." };
@@ -353,6 +357,10 @@ export async function updateProductAction(input: UpdateProductInput) {
 
 export async function deleteProductAction(input: DeleteProductInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const productId = input.productId.trim();
   if (!productId) {
     return { ok: false as const, error: "Product id is required." };
@@ -385,6 +393,10 @@ export async function deleteProductAction(input: DeleteProductInput) {
 
 export async function importProductCatalogAction(formData: FormData) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const file = formData.get("file");
   if (!(file instanceof File)) {
     return { ok: false as const, error: "Catalog file is required." };

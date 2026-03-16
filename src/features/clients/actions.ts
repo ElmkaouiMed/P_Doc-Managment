@@ -1,7 +1,7 @@
 "use server";
 
 import { prisma } from "@/lib/db";
-import { requireAuthContext } from "@/features/auth/lib/session";
+import { getCompanyWriteAccessError, requireAuthContext } from "@/features/auth/lib/session";
 
 type DeleteClientInput = {
   clientId: string;
@@ -29,6 +29,10 @@ function cleanText(value: string | undefined) {
 
 export async function updateClientAction(input: UpdateClientInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const clientId = input.clientId.trim();
   if (!clientId) {
     return { ok: false as const, error: "Client id is required." };
@@ -101,6 +105,10 @@ export async function updateClientAction(input: UpdateClientInput) {
 
 export async function deleteClientAction(input: DeleteClientInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const clientId = input.clientId.trim();
   if (!clientId) {
     return { ok: false as const, error: "Client id is required." };

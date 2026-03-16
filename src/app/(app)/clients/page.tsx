@@ -7,53 +7,59 @@ export default async function ClientsPage() {
   const auth = await requireAuthContext();
   const { t } = await getServerI18n();
   const companyId = auth.company.id;
-  const clients = await prisma.client.findMany({
-    where: { companyId },
-    orderBy: { updatedAt: "desc" },
-    select: {
-      id: true,
-      code: true,
-      name: true,
-      email: true,
-      phone: true,
-      phoneFix: true,
-      address: true,
-      city: true,
-      country: true,
-      ice: true,
-      ifNumber: true,
-      notes: true,
-      updatedAt: true,
-    },
-  });
-
-  const documentAgg = await prisma.document.groupBy({
-    where: {
-      companyId,
-      clientId: { not: null },
-    },
-    by: ["clientId"],
-    _count: { _all: true },
-    _sum: {
-      totalTTC: true,
-      amountDue: true,
-      amountPaid: true,
-    },
-    _max: {
-      issueDate: true,
-      createdAt: true,
-    },
-  });
-
-  const overdueAgg = await prisma.document.groupBy({
-    where: {
-      companyId,
-      clientId: { not: null },
-      status: "OVERDUE",
-    },
-    by: ["clientId"],
-    _count: { _all: true },
-  });
+  const [clients, documentAgg, overdueAgg, latestDocument] = await Promise.all([
+    prisma.client.findMany({
+      where: { companyId },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        email: true,
+        phone: true,
+        phoneFix: true,
+        address: true,
+        city: true,
+        country: true,
+        ice: true,
+        ifNumber: true,
+        notes: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.document.groupBy({
+      where: {
+        companyId,
+        clientId: { not: null },
+      },
+      by: ["clientId"],
+      _count: { _all: true },
+      _sum: {
+        totalTTC: true,
+        amountDue: true,
+        amountPaid: true,
+      },
+      _max: {
+        issueDate: true,
+        createdAt: true,
+      },
+    }),
+    prisma.document.groupBy({
+      where: {
+        companyId,
+        clientId: { not: null },
+        status: "OVERDUE",
+      },
+      by: ["clientId"],
+      _count: { _all: true },
+    }),
+    prisma.document.findFirst({
+      where: { companyId },
+      orderBy: [{ issueDate: "desc" }, { createdAt: "desc" }],
+      select: { currency: true },
+    }),
+  ]);
+  const currency = latestDocument?.currency || "MAD";
 
   const docByClient = new Map(
     documentAgg
@@ -94,7 +100,7 @@ export default async function ClientsPage() {
           {t("clients.page.subtitle")}
         </p>
       </header>
-      <ClientsView clients={rows} />
+      <ClientsView clients={rows} currency={currency} />
     </div>
   );
 }

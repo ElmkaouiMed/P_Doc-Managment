@@ -7,10 +7,11 @@ import { FormField } from "@/components/ui/form-field";
 import { HugIcon } from "@/components/ui/hug-icon";
 import { useToast } from "@/components/ui/toast";
 import { UiButton } from "@/components/ui/ui-button";
-import { generateDocumentExportAction, listTemplateAssetsAction, type TemplateAssetRow } from "@/features/templates/actions";
+import { generateDocumentExportAction, listTemplateAssetsAction } from "@/features/templates/actions";
 import { emitWorkspaceEvent, ExportSettings, STORE_EVENTS } from "@/features/documents/lib/workspace-store";
 import { DOCUMENT_TYPE_OPTIONS } from "@/features/documents/lib/workspace-store";
 import { getCompanyExportSettingsAction } from "@/features/settings/actions";
+import type { TemplateAssetRow } from "@/features/templates/types";
 import { useI18n } from "@/i18n/provider";
 
 type DocumentType = (typeof DOCUMENT_TYPE_OPTIONS)[number];

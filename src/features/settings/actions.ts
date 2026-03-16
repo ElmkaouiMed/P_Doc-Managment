@@ -1,7 +1,7 @@
 "use server";
 
 import { prisma } from "@/lib/db";
-import { requireAuthContext } from "@/features/auth/lib/session";
+import { getCompanyWriteAccessError, requireAuthContext } from "@/features/auth/lib/session";
 import { APP_LOCALE_SETTING_KEY } from "@/i18n/constants";
 
 const EMAIL_CONFIG_KEY = "email-config";
@@ -483,6 +483,10 @@ export async function getCompanyBusinessConfigAction() {
 
 export async function saveCompanyBusinessConfigAction(input: Partial<BusinessConfigInput>) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const existing = await prisma.companySetting.findUnique({
     where: {
       companyId_key: {
@@ -522,6 +526,10 @@ export async function saveCompanyBusinessConfigAction(input: Partial<BusinessCon
 
 export async function saveCompanyGeneralInfoAction(input: Partial<GeneralInfoInput>) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const [company, localeRow] = await Promise.all([
     prisma.company.findUnique({
       where: { id: auth.company.id },
@@ -640,6 +648,10 @@ export async function getCompanyEmailConfigAction() {
 
 export async function saveCompanyEmailConfigAction(input: Partial<EmailConfigInput>) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const next = sanitizeEmailConfig({
     ...defaultEmailConfig(),
     ...input,
@@ -696,6 +708,10 @@ export async function getCompanyEmailTemplatesAction() {
 
 export async function saveCompanyEmailTemplatesAction(input: EmailTemplateSettingsPatchInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const existing = await prisma.companySetting.findUnique({
     where: {
       companyId_key: {
@@ -767,6 +783,10 @@ export async function getCompanyExportSettingsAction() {
 
 export async function saveCompanyExportSettingsAction(input: Partial<ExportSettingsInput>) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const existing = await prisma.companySetting.findUnique({
     where: {
       companyId_key: {
@@ -838,6 +858,10 @@ export async function getCompanyDocumentUnitsAction() {
 
 export async function saveCompanyDocumentUnitsAction(units: string[]) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const next = sanitizeUnits(units);
 
   await prisma.companySetting.upsert({
@@ -901,6 +925,10 @@ export async function saveCompanyTemplateColumnsAction(input: {
   columns: TemplateLineColumnInput[];
 }) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const safeDocumentType = sanitizeDocumentType(input.documentType);
   const key = templateColumnsKey(safeDocumentType);
   const next = sanitizeColumns(input.columns);
@@ -961,6 +989,10 @@ export async function getCompanyViewPreferenceAction(scope: ViewPreferenceScope)
 
 export async function saveCompanyViewPreferenceAction(input: { scope: ViewPreferenceScope; mode: ViewMode }) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const key = viewPreferenceKey(input.scope);
   const nextMode = sanitizeViewMode(input.mode);
 

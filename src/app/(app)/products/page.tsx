@@ -7,21 +7,29 @@ export default async function ProductsPage() {
   const auth = await requireAuthContext();
   const { t } = await getServerI18n();
   const companyId = auth.company.id;
-  const products = await prisma.product.findMany({
-    where: { companyId },
-    orderBy: { updatedAt: "desc" },
-    select: {
-      id: true,
-      sku: true,
-      name: true,
-      description: true,
-      unit: true,
-      priceHT: true,
-      vatRate: true,
-      isActive: true,
-      updatedAt: true,
-    },
-  });
+  const [products, latestDocument] = await Promise.all([
+    prisma.product.findMany({
+      where: { companyId },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        sku: true,
+        name: true,
+        description: true,
+        unit: true,
+        priceHT: true,
+        vatRate: true,
+        isActive: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.document.findFirst({
+      where: { companyId },
+      orderBy: [{ issueDate: "desc" }, { createdAt: "desc" }],
+      select: { currency: true },
+    }),
+  ]);
+  const currency = latestDocument?.currency || "MAD";
 
   const productIds = products.map((product) => product.id);
   const lineItems = productIds.length
@@ -95,7 +103,7 @@ export default async function ProductsPage() {
           {t("products.page.subtitle")}
         </p>
       </header>
-      <ProductsView products={rows} />
+      <ProductsView products={rows} currency={currency} />
     </div>
   );
 }

@@ -287,7 +287,7 @@ export function NotificationCenter() {
       ) : null}
 
       {open ? (
-        <div className="absolute top-14 rtl:left-0 ltr:right-0 z-40 w-[360px] max-w-[calc(100vw-2rem)] space-y-2 rounded-md border border-border bg-card/95 p-2 shadow-xl shadow-black/40">
+        <div className="absolute top-14 rtl:left-0 ltr:right-0 z-50 w-[360px] max-w-[calc(100vw-2rem)] space-y-2 rounded-md border border-border bg-card/95 p-2 shadow-xl shadow-black/40">
           <div className="flex items-center justify-between px-1">
             <p className="text-xs font-semibold text-foreground">{t("header.notifications")}</p>
             {unreadItemsCount > 0 ? (
@@ -297,7 +297,7 @@ export function NotificationCenter() {
             ) : null}
           </div>
 
-          <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
+          <div className="max-h-52 space-y-2 overflow-y-auto pr-1">
             {loading ? (
               <p className="rounded-md border border-border bg-background/40 p-3 text-xs text-muted-foreground">{t("header.notificationsLoading")}</p>
             ) : items.length ? (

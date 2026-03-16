@@ -182,6 +182,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
   const [onlyOverdue, setOnlyOverdue] = useState(false);
   const [onlyPaid, setOnlyPaid] = useState(false);
   const [viewMode, setViewMode] = useState<DocumentViewMode>("table");
+  const [isSmallScreen, setIsSmallScreen] = useState(false);
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplateSettings>(() => createDefaultEmailTemplates());
   const [detailsDocumentId, setDetailsDocumentId] = useState<string | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
@@ -206,6 +207,17 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
   useEffect(() => {
     setAllRows(initialRows);
   }, [initialRows]);
+
+  useEffect(() => {
+    const syncViewport = () => {
+      setIsSmallScreen(window.innerWidth < 640);
+    };
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
+    return () => {
+      window.removeEventListener("resize", syncViewport);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -525,6 +537,16 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
       label: documentTypeLabel(targetType),
     }));
   }, [convertSourceDocument, documentTypeLabel]);
+  const selectedConvertTargetLabel = useMemo(
+    () => convertTargetOptions.find((option) => option.value === convertTargetType)?.label || "",
+    [convertTargetOptions, convertTargetType],
+  );
+
+  const closeConvertModal = useCallback(() => {
+    setConvertOpen(false);
+    setConvertSourceDocument(null);
+    setConvertTargetType("");
+  }, []);
 
   const submitConversion = async () => {
     if (!convertSourceDocument) {
@@ -542,9 +564,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
       error(t("documents.toasts.convertFailed"), result.error);
       return;
     }
-    setConvertOpen(false);
-    setConvertSourceDocument(null);
-    setConvertTargetType("");
+    closeConvertModal();
     void refreshDocuments();
     success(t("documents.toasts.converted"), `${result.source.number} -> ${result.document.number}`);
   };
@@ -614,6 +634,8 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
         }
       : null);
 
+  const activeViewMode: DocumentViewMode = isSmallScreen ? "grid" : viewMode;
+
   return (
     <div className="space-y-4">
       <div className="space-y-4 rounded-md border border-border p-4">
@@ -651,7 +673,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
             <FormField type="checkbox" label={t("documents.filters.overdueOnly")} checked={onlyOverdue} onCheckedChange={setOnlyOverdue} className="font-light" />
             <FormField type="checkbox" label={t("documents.filters.paidOnly")} checked={onlyPaid} onCheckedChange={setOnlyPaid} className="font-light" />
           </div>
-          <div className="flex items-center gap-2">
+          <div className="hidden items-center gap-2 sm:flex">
             <UiButton
               type="button"
               size="xs"
@@ -659,7 +681,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
               iconName="table"
               aria-label={t("common.tableView")}
               title={t("common.tableView")}
-              variant={viewMode === "table" ? "primary" : "ghost"}
+              variant={activeViewMode === "table" ? "primary" : "ghost"}
               onClick={() => setPreferredViewMode("table")}
             />
             <UiButton
@@ -669,7 +691,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
               iconName="grid"
               aria-label={t("common.gridView")}
               title={t("common.gridView")}
-              variant={viewMode === "grid" ? "primary" : "ghost"}
+              variant={activeViewMode === "grid" ? "primary" : "ghost"}
               onClick={() => setPreferredViewMode("grid")}
             />
           </div>
@@ -689,7 +711,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
         </div>
       </div>
 
-      {viewMode === "table" ? (
+      {activeViewMode === "table" ? (
         <div className="overflow-x-auto rounded-md border border-border bg-card/70">
           <table className="w-full text-sm">
             <thead className="bg-background/70 text-xs uppercase tracking-[0.2em] text-muted-foreground">
@@ -999,37 +1021,49 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
       />
 
       {convertOpen && convertSourceDocument ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <div className="w-full max-w-md rounded-md border border-border bg-card/95 p-4 shadow-2xl shadow-black/50">
-            <div className="mb-3 flex items-start justify-between gap-3">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("documents.convertModal.tag")}</p>
-                <h3 className="text-base font-semibold text-foreground">{t("documents.convertModal.title")}</h3>
-                <p className="text-xs text-muted-foreground">
-                  {convertSourceDocument.number} - {documentTypeLabel(convertSourceDocument.type)}
-                </p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg overflow-hidden rounded-xl border border-border/80 bg-card/95 shadow-2xl shadow-black/50">
+            <div className="border-b border-border/70 bg-background/30 px-5 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3">
+                  <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-primary/40 bg-primary/15 text-primary">
+                    <HugIcon icon={Exchange01Icon} size={16} />
+                  </span>
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{t("documents.convertModal.tag")}</p>
+                    <h3 className="text-base font-semibold text-foreground">{t("documents.convertModal.title")}</h3>
+                    <p className="text-xs text-muted-foreground">
+                      {convertSourceDocument.number} - {documentTypeLabel(convertSourceDocument.type)}
+                    </p>
+                  </div>
+                </div>
+                <UiButton type="button" size="xs" iconOnly iconName="close" variant="ghost" onClick={closeConvertModal} />
               </div>
-              <UiButton
-                type="button"
-                size="xs"
-                iconOnly
-                iconName="close"
-                variant="ghost"
-                onClick={() => {
-                  setConvertOpen(false);
-                  setConvertSourceDocument(null);
-                  setConvertTargetType("");
-                }}
-              />
             </div>
 
-            <div className="space-y-3">
-              <div className="space-y-1">
+            <div className="space-y-4 px-5 py-4">
+              <div className="grid gap-3 rounded-lg border border-border/70 bg-background/30 p-3 sm:grid-cols-[1fr_auto_1fr] sm:items-center">
+                <div className="space-y-1">
+                  <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">{t("documents.details.from")}</p>
+                  <p className="text-sm font-semibold text-foreground">{documentTypeLabel(convertSourceDocument.type)}</p>
+                </div>
+                <div className="flex items-center justify-center">
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-primary/30 bg-primary/10 text-primary">
+                    <HugIcon icon={Exchange01Icon} size={13} />
+                  </span>
+                </div>
+                <div className="space-y-1 text-start sm:text-end">
+                  <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">{t("documents.convertModal.targetType")}</p>
+                  <p className="text-sm font-semibold text-foreground">{selectedConvertTargetLabel || "-"}</p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
                 <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("documents.convertModal.targetType")}</p>
                 <div
                   className="grid gap-2"
                   style={{
-                    gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
                   }}
                 >
                   {convertTargetOptions.map((option) => {
@@ -1041,43 +1075,41 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
                         onClick={() => setConvertTargetType(option.value as (typeof DOCUMENT_TYPE_OPTIONS)[number])}
                         className={
                           active
-                            ? "inline-flex h-9 w-full items-center justify-center rounded-md border border-primary/40 bg-primary/15 px-3 text-xs font-semibold text-primary"
-                            : "inline-flex h-9 w-full items-center justify-center rounded-md border border-border bg-background/60 px-3 text-xs font-semibold text-muted-foreground transition hover:border-primary/40 hover:text-foreground"
+                            ? "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-primary/50 bg-primary/15 px-3 text-xs font-semibold text-primary shadow-sm shadow-primary/10"
+                            : "inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-border bg-background/60 px-3 text-xs font-semibold text-muted-foreground transition hover:border-primary/40 hover:text-foreground"
                         }
                       >
+                        <HugIcon icon={FileExportIcon} size={13} />
                         {option.label}
                       </button>
                     );
                   })}
                 </div>
               </div>
+
               {!convertTargetOptions.length ? (
-                <p className="text-xs text-muted-foreground">{t("documents.convertModal.noTarget")}</p>
+                <p className="rounded-md border border-border/70 bg-background/30 px-3 py-2 text-xs text-muted-foreground">
+                  {t("documents.convertModal.noTarget")}
+                </p>
               ) : null}
             </div>
 
-            <div className="mt-4 flex items-center justify-end gap-2">
-              <UiButton
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setConvertOpen(false);
-                  setConvertSourceDocument(null);
-                  setConvertTargetType("");
-                }}
-              >
-                {t("common.cancel")}
-              </UiButton>
-              <UiButton
-                type="button"
-                size="sm"
-                variant="primary"
-                disabled={!convertTargetOptions.length || !convertTargetType}
-                onClick={() => void submitConversion()}
-              >
-                {t("documents.convertModal.convertNow")}
-              </UiButton>
+            <div className="border-t border-border/70 bg-background/20 px-5 py-3">
+              <div className="flex items-center justify-end gap-2">
+                <UiButton type="button" size="sm" variant="ghost" icon={Cancel01Icon} onClick={closeConvertModal}>
+                  {t("common.cancel")}
+                </UiButton>
+                <UiButton
+                  type="button"
+                  size="sm"
+                  variant="primary"
+                  icon={Exchange01Icon}
+                  disabled={!convertTargetOptions.length || !convertTargetType}
+                  onClick={() => void submitConversion()}
+                >
+                  {t("documents.convertModal.convertNow")}
+                </UiButton>
+              </div>
             </div>
           </div>
         </div>

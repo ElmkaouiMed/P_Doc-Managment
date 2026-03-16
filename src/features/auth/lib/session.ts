@@ -1,9 +1,11 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { cache } from "react";
-import { MembershipRole } from "@prisma/client";
+import { CompanyAccountStatus, MembershipRole } from "@prisma/client";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
+import { lifecycleAccessError, isWriteAccessAllowed } from "@/features/billing/lib/account-lifecycle";
+import { syncCompanyLifecycleStatus } from "@/features/billing/lib/account-lifecycle-service";
 import { prisma } from "@/lib/db";
 import { toPublicDatabaseError } from "@/lib/errors/prisma";
 
@@ -25,6 +27,10 @@ export type AuthContext = {
     id: string;
     name: string;
     slug: string;
+    accountStatus: CompanyAccountStatus;
+    trialEndsAt: Date | null;
+    graceEndsAt: Date | null;
+    lockedAt: Date | null;
   };
   role: MembershipRole;
 };
@@ -142,6 +148,10 @@ export const getAuthContext = cache(async (): Promise<AuthContext | null> => {
                 id: true,
                 name: true,
                 slug: true,
+                accountStatus: true,
+                trialEndsAt: true,
+                graceEndsAt: true,
+                lockedAt: true,
               },
             },
           },
@@ -157,16 +167,34 @@ export const getAuthContext = cache(async (): Promise<AuthContext | null> => {
     return null;
   }
 
+  const lifecycle = await syncCompanyLifecycleStatus(membership.company.id);
+  const companyAccountStatus = lifecycle?.status || membership.company.accountStatus;
+
   return {
     user: {
       id: user.id,
       email: user.email,
       fullName: user.fullName,
     },
-    company: membership.company,
+    company: {
+      id: membership.company.id,
+      name: membership.company.name,
+      slug: membership.company.slug,
+      accountStatus: companyAccountStatus,
+      trialEndsAt: membership.company.trialEndsAt,
+      graceEndsAt: membership.company.graceEndsAt,
+      lockedAt: membership.company.lockedAt,
+    },
     role: membership.role,
   };
 });
+
+export function getCompanyWriteAccessError(auth: Pick<AuthContext, "company">) {
+  if (isWriteAccessAllowed(auth.company.accountStatus)) {
+    return null;
+  }
+  return lifecycleAccessError(auth.company.accountStatus);
+}
 
 export async function requireAuthContext() {
   const auth = await getAuthContext();

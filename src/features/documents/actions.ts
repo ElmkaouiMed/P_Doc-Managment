@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { DocumentStatus, DocumentType, ImportType, Prisma, RelationType } from "@prisma/client";
 
-import { requireAuthContext } from "@/features/auth/lib/session";
+import { getCompanyWriteAccessError, requireAuthContext } from "@/features/auth/lib/session";
 import {
   notifyDocumentStatusChange,
   notifyEmailFailure,
@@ -821,6 +821,10 @@ export async function listDocumentsAction() {
 
 export async function upsertClientFromDocumentAction(input: UpsertClientInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const name = input.name.trim();
   if (!name) {
     return { ok: false as const, error: "Client name is required." };
@@ -862,6 +866,10 @@ export async function upsertClientFromDocumentAction(input: UpsertClientInput) {
 
 export async function upsertProductFromDocumentAction(input: UpsertProductInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const designation = input.designation.trim();
   if (!designation) {
     return { ok: false as const, error: "Product designation is required." };
@@ -906,6 +914,10 @@ export async function upsertProductFromDocumentAction(input: UpsertProductInput)
 
 export async function createDocumentFromDraftAction(input: CreateDocumentFromDraftInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const companyId = auth.company.id;
   const clientName = input.client.name.trim();
   if (!clientName) {
@@ -1311,6 +1323,10 @@ export async function getDocumentDetailsAction(input: GetDocumentDetailsInput) {
 
 export async function updateDocumentFromDraftAction(input: UpdateDocumentFromDraftInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const companyId = auth.company.id;
   const documentId = input.documentId.trim();
   const clientName = input.client.name.trim();
@@ -1421,6 +1437,10 @@ export async function updateDocumentFromDraftAction(input: UpdateDocumentFromDra
 
 export async function updateDocumentStatusAction(input: UpdateDocumentStatusInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   await syncOverdueStatuses(auth.company.id);
   const documentId = input.documentId.trim();
   if (!documentId) {
@@ -1460,6 +1480,10 @@ export async function updateDocumentStatusAction(input: UpdateDocumentStatusInpu
 
 export async function sendDocumentEmailAction(input: SendDocumentEmailInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   await syncOverdueStatuses(auth.company.id);
 
   const documentId = input.documentId.trim();
@@ -1620,6 +1644,10 @@ export async function sendDocumentEmailAction(input: SendDocumentEmailInput) {
 
 export async function deleteDocumentAction(input: DeleteDocumentInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const documentId = input.documentId?.trim();
 
   let existing: { id: string } | null = null;
@@ -1665,6 +1693,10 @@ export async function deleteDocumentAction(input: DeleteDocumentInput) {
 
 export async function queueExcelImportAction(formData: FormData) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, errorCode: "ACCOUNT_READ_ONLY", error: writeAccessError };
+  }
   const file = formData.get("file");
   if (!(file instanceof File)) {
     return { ok: false as const, errorCode: "FILE_REQUIRED", error: "Excel file is required." };
@@ -1856,6 +1888,10 @@ export async function queueExcelImportAction(formData: FormData) {
 
 export async function convertDocumentAction(input: ConvertDocumentInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const documentId = input.documentId.trim();
   if (!documentId) {
     return { ok: false as const, error: "Document id is required." };

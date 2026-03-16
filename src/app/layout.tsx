@@ -39,8 +39,8 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0f172a",
-  colorScheme: "dark",
+  themeColor: "#f4f7fb",
+  colorScheme: "light dark",
 };
 
 const EXTENSION_ATTRS_GUARD = `
@@ -110,7 +110,7 @@ export default async function RootLayout({
   const fontVariables = `${geistSans.variable} ${geistMono.variable} ${cairo.variable}`;
 
   return (
-    <html lang={locale} dir={direction} className="dark" suppressHydrationWarning>
+    <html lang={locale} dir={direction} suppressHydrationWarning>
       <body suppressHydrationWarning>
         <Script id="extension-attrs-guard" strategy="beforeInteractive">
           {EXTENSION_ATTRS_GUARD}

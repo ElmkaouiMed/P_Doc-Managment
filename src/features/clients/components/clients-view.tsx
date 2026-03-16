@@ -4,6 +4,7 @@ import { AiSearchIcon, Cancel01Icon, Edit02Icon, EyeIcon, UserSquareIcon } from 
 import { useEffect, useMemo, useState } from "react";
 
 import { ActionMenu } from "@/components/ui/action-menu";
+import { StatCard } from "@/components/common/stat-card";
 import { FilterField } from "@/components/ui/filter-field";
 import { FormField } from "@/components/ui/form-field";
 import { HugIcon } from "@/components/ui/hug-icon";
@@ -40,9 +41,10 @@ type ClientRow = {
 
 type ClientsViewProps = {
   clients: ClientRow[];
+  currency: string;
 };
 
-export function ClientsView({ clients }: ClientsViewProps) {
+export function ClientsView({ clients, currency }: ClientsViewProps) {
   const { success, error } = useToast();
   const { t } = useI18n();
   const { confirm } = useMsgBox();
@@ -50,6 +52,7 @@ export function ClientsView({ clients }: ClientsViewProps) {
   const [query, setQuery] = useState("");
   const [relationFilter, setRelationFilter] = useState("all");
   const [viewMode, setViewMode] = useState<ClientViewMode>("table");
+  const [isSmallScreen, setIsSmallScreen] = useState(false);
   const [detailsClientId, setDetailsClientId] = useState<string | null>(null);
   const [editClientId, setEditClientId] = useState<string | null>(null);
   const [isEditSaving, setIsEditSaving] = useState(false);
@@ -89,6 +92,17 @@ export function ClientsView({ clients }: ClientsViewProps) {
   useEffect(() => {
     setRows(clients);
   }, [clients]);
+
+  useEffect(() => {
+    const syncViewport = () => {
+      setIsSmallScreen(window.innerWidth < 640);
+    };
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
+    return () => {
+      window.removeEventListener("resize", syncViewport);
+    };
+  }, []);
 
   const setMode = (mode: ClientViewMode) => {
     setViewMode(mode);
@@ -249,14 +263,16 @@ export function ClientsView({ clients }: ClientsViewProps) {
     />
   );
 
+  const activeViewMode: ClientViewMode = isSmallScreen ? "grid" : viewMode;
+
   return (
     <div className="space-y-4">
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <SummaryCard label={t("clients.summary.totalClients")} value={String(stats.total)} />
-        <SummaryCard label={t("clients.summary.relatedDocuments")} value={String(stats.totalDocuments)} />
-        <SummaryCard label={t("clients.summary.outstandingDue")} value={`${stats.totalDue.toFixed(2)} MAD`} />
-        <SummaryCard label={t("clients.summary.totalPaid")} value={`${stats.totalPaid.toFixed(2)} MAD`} />
-        <SummaryCard label={t("clients.summary.overdueClients")} value={String(stats.overdueClients)} />
+        <StatCard label={t("clients.summary.totalClients")} value={String(stats.total)} />
+        <StatCard label={t("clients.summary.relatedDocuments")} value={String(stats.totalDocuments)} />
+        <StatCard label={t("clients.summary.outstandingDue")} amount={stats.totalDue} currency={currency} metaTone="negative" />
+        <StatCard label={t("clients.summary.totalPaid")} amount={stats.totalPaid} currency={currency} metaTone="positive" />
+        <StatCard label={t("clients.summary.overdueClients")} value={String(stats.overdueClients)} />
       </div>
 
       <div className="space-y-3 rounded-md border border-border bg-card/70 p-4">
@@ -277,7 +293,7 @@ export function ClientsView({ clients }: ClientsViewProps) {
               { value: "overdue", label: t("clients.filters.hasOverdue") },
             ]}
           />
-          <div className="flex items-center gap-2">
+          <div className="hidden items-center gap-2 sm:flex">
             <UiButton
               type="button"
               size="xs"
@@ -285,7 +301,7 @@ export function ClientsView({ clients }: ClientsViewProps) {
               iconName="table"
               aria-label={t("common.tableView")}
               title={t("common.tableView")}
-              variant={viewMode === "table" ? "primary" : "ghost"}
+              variant={activeViewMode === "table" ? "primary" : "ghost"}
               onClick={() => setMode("table")}
             />
             <UiButton
@@ -295,14 +311,14 @@ export function ClientsView({ clients }: ClientsViewProps) {
               iconName="grid"
               aria-label={t("common.gridView")}
               title={t("common.gridView")}
-              variant={viewMode === "grid" ? "primary" : "ghost"}
+              variant={activeViewMode === "grid" ? "primary" : "ghost"}
               onClick={() => setMode("grid")}
             />
           </div>
         </div>
       </div>
 
-      {viewMode === "table" ? (
+      {activeViewMode === "table" ? (
         <div className="overflow-x-auto rounded-md border border-border bg-card/70">
           <table className="w-full text-sm">
             <thead className="bg-background/70 text-xs uppercase tracking-[0.2em] text-muted-foreground">
@@ -349,33 +365,27 @@ export function ClientsView({ clients }: ClientsViewProps) {
             filtered.map((client) => (
               <article key={client.id} className="space-y-3 rounded-md border border-border bg-card/70 p-4">
                 <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-semibold text-foreground">{client.name}</p>
-                    <p className="text-xs text-muted-foreground">{client.email || t("clients.card.noEmail")}</p>
+                  <div className="min-w-0">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{client.code || t("clients.form.code")}</p>
+                    <h3 className="truncate text-sm font-semibold text-foreground">{client.name}</h3>
                   </div>
                   {renderActions(client)}
                 </div>
-                <p className="text-xs text-muted-foreground">{client.phone || t("clients.card.noPhone")}</p>
-                <p className="text-xs text-muted-foreground">{client.address || t("clients.card.noAddress")}</p>
-                <div className="grid gap-1 rounded-md border border-border bg-background/30 p-2 text-[11px] text-muted-foreground">
-                  <p className="flex items-center justify-between">
-                    <span>{t("clients.table.documents")}</span>
-                    <span className="font-semibold text-foreground">{client.documentsCount}</span>
-                  </p>
-                  <p className="flex items-center justify-between">
-                    <span>{t("clients.table.billed")}</span>
-                    <span className="font-semibold text-foreground">{client.totalBilled.toFixed(2)} MAD</span>
-                  </p>
-                  <p className="flex items-center justify-between">
-                    <span>{t("clients.table.due")}</span>
-                    <span className="font-semibold text-foreground">{client.totalDue.toFixed(2)} MAD</span>
-                  </p>
-                </div>
-                <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                  <span>
-                    {client.code || "-"} - {client.ice || "-"} / {client.ifNumber || "-"}
-                  </span>
-                  <span>{client.lastDocumentAt ? client.lastDocumentAt.slice(0, 10) : client.updatedAt.slice(0, 10)}</span>
+                <p className="truncate text-xs text-muted-foreground">{client.email || t("clients.card.noEmail")}</p>
+                <div className="flex items-end justify-between gap-3">
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <p>{client.phone || t("clients.card.noPhone")}</p>
+                    <p>
+                      {t("clients.table.documents")}: <span className="font-semibold text-foreground">{client.documentsCount}</span>
+                    </p>
+                    <p>{client.lastDocumentAt ? client.lastDocumentAt.slice(0, 10) : client.updatedAt.slice(0, 10)}</p>
+                  </div>
+                  <div className="text-end">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("clients.table.due")}</p>
+                    <p className={client.totalDue > 0 ? "text-sm font-semibold text-rose-300" : "text-sm font-semibold text-foreground"}>
+                      {client.totalDue.toFixed(2)} {currency}
+                    </p>
+                  </div>
                 </div>
               </article>
             ))
@@ -465,15 +475,6 @@ export function ClientsView({ clients }: ClientsViewProps) {
         </div>
       ) : null}
     </div>
-  );
-}
-
-function SummaryCard({ label, value }: { label: string; value: string }) {
-  return (
-    <article className="rounded-md border border-border bg-card/70 p-4">
-      <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{label}</p>
-      <p className="mt-2 text-2xl font-semibold text-foreground">{value}</p>
-    </article>
   );
 }
 

@@ -3,6 +3,7 @@
 import { MembershipRole } from "@prisma/client";
 import { redirect } from "next/navigation";
 
+import { buildTrialLifecycle } from "@/features/billing/lib/account-lifecycle";
 import { prisma } from "@/lib/db";
 import { isDatabaseConnectivityError } from "@/lib/errors/prisma";
 import { ensureDemoAccount } from "@/features/auth/lib/demo";
@@ -29,7 +30,7 @@ function toSlug(value: string) {
   return slug || "workspace";
 }
 
-async function createCompanyWithUniqueSlug(companyName: string) {
+async function createCompanyWithUniqueSlug(companyName: string, lifecycleData: ReturnType<typeof buildTrialLifecycle>) {
   const baseSlug = toSlug(companyName);
   let attempt = 0;
 
@@ -39,7 +40,7 @@ async function createCompanyWithUniqueSlug(companyName: string) {
     const exists = await prisma.company.findUnique({ where: { slug }, select: { id: true } });
     if (!exists) {
       return prisma.company.create({
-        data: { name: companyName, slug },
+        data: { name: companyName, slug, ...lifecycleData },
       });
     }
     attempt += 1;
@@ -49,6 +50,7 @@ async function createCompanyWithUniqueSlug(companyName: string) {
     data: {
       name: companyName,
       slug: `${baseSlug}-${Date.now()}`,
+      ...lifecycleData,
     },
   });
 }
@@ -123,7 +125,8 @@ export async function signUpAction(formData: FormData) {
       loginErrorRedirect("auth.errors.emailAlreadyUsed", "signup");
     }
 
-    const company = await createCompanyWithUniqueSlug(companyName);
+    const trialLifecycle = buildTrialLifecycle();
+    const company = await createCompanyWithUniqueSlug(companyName, trialLifecycle);
     const user = await prisma.user.create({
       data: {
         fullName,
@@ -139,6 +142,16 @@ export async function signUpAction(formData: FormData) {
         userId: user.id,
         role: MembershipRole.OWNER,
         isActive: true,
+      },
+    });
+
+    await prisma.companyAccountStatusEvent.create({
+      data: {
+        companyId: company.id,
+        actorId: user.id,
+        fromStatus: null,
+        toStatus: trialLifecycle.accountStatus,
+        reason: "SIGNUP_TRIAL_STARTED",
       },
     });
 

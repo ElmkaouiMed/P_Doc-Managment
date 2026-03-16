@@ -4,7 +4,8 @@ import { DocumentStatus, DocumentType, ExportFormat, TemplateFormat } from "@pri
 import { mkdir, readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
 
-import { requireAuthContext } from "@/features/auth/lib/session";
+import { getCompanyWriteAccessError, requireAuthContext } from "@/features/auth/lib/session";
+import type { TemplateAssetRow } from "@/features/templates/types";
 import { prisma } from "@/lib/db";
 
 const MAX_TEMPLATE_FILE_SIZE = 8 * 1024 * 1024;
@@ -19,24 +20,6 @@ const ALLOWED_EXTENSIONS: Record<string, TemplateFormat> = {
   ".xlsx": TemplateFormat.XLSX,
   ".html": TemplateFormat.HTML,
   ".htm": TemplateFormat.HTML,
-};
-
-type TemplateVariableArray = string[];
-
-export type TemplateAssetRow = {
-  id: string;
-  documentType: DocumentType;
-  name: string;
-  description: string;
-  format: TemplateFormat;
-  isDefault: boolean;
-  isActive: boolean;
-  versionNumber: number;
-  fileName: string;
-  fileSize: number;
-  variables: TemplateVariableArray;
-  uploadedAt: string;
-  updatedAt: string;
 };
 
 type ListTemplateAssetsInput = {
@@ -233,38 +216,85 @@ function toDateLabel(value: Date | null | undefined) {
   return value.toISOString().slice(0, 10);
 }
 
-const SMALL_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"] as const;
-const TEEN_WORDS = ["ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"] as const;
-const TENS_WORDS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"] as const;
+const FR_UNITS = [
+  "zero",
+  "un",
+  "deux",
+  "trois",
+  "quatre",
+  "cinq",
+  "six",
+  "sept",
+  "huit",
+  "neuf",
+  "dix",
+  "onze",
+  "douze",
+  "treize",
+  "quatorze",
+  "quinze",
+  "seize",
+] as const;
 
-function wordsBelowThousand(value: number): string {
-  if (value < 10) {
-    return SMALL_WORDS[value] || "zero";
+function twoDigitsToFrench(value: number): string {
+  if (value < 17) {
+    return FR_UNITS[value] || "zero";
   }
   if (value < 20) {
-    return TEEN_WORDS[value - 10] || "";
+    return `dix-${FR_UNITS[value - 10]}`;
   }
-  if (value < 100) {
+  if (value < 70) {
     const tens = Math.floor(value / 10);
-    const rest = value % 10;
-    return rest ? `${TENS_WORDS[tens]} ${wordsBelowThousand(rest)}` : TENS_WORDS[tens] || "";
+    const unit = value % 10;
+    const tensLabels: Record<number, string> = {
+      2: "vingt",
+      3: "trente",
+      4: "quarante",
+      5: "cinquante",
+      6: "soixante",
+    };
+    const base = tensLabels[tens] || "";
+    if (!unit) {
+      return base;
+    }
+    if (unit === 1) {
+      return `${base} et un`;
+    }
+    return `${base}-${FR_UNITS[unit]}`;
+  }
+  if (value < 80) {
+    if (value === 71) {
+      return "soixante et onze";
+    }
+    return `soixante-${twoDigitsToFrench(value - 60)}`;
+  }
+  if (value === 80) {
+    return "quatre-vingts";
+  }
+  return `quatre-vingt-${twoDigitsToFrench(value - 80)}`;
+}
+
+function belowThousandToFrench(value: number): string {
+  if (value < 100) {
+    return twoDigitsToFrench(value);
   }
   const hundreds = Math.floor(value / 100);
   const rest = value % 100;
+  const hundredLabel = hundreds === 1 ? "cent" : `${FR_UNITS[hundreds]} cent`;
   if (!rest) {
-    return `${wordsBelowThousand(hundreds)} hundred`;
+    return hundreds > 1 ? `${hundredLabel}s` : hundredLabel;
   }
-  return `${wordsBelowThousand(hundreds)} hundred ${wordsBelowThousand(rest)}`;
+  return `${hundredLabel} ${twoDigitsToFrench(rest)}`;
 }
 
-function integerToWords(value: number): string {
+function integerToFrenchWords(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return "zero";
   }
   const scales = [
-    { size: 1_000_000_000, label: "billion" },
-    { size: 1_000_000, label: "million" },
-    { size: 1_000, label: "thousand" },
+    { size: 1_000_000_000, singular: "milliard", plural: "milliards" },
+    { size: 1_000_000, singular: "million", plural: "millions" },
+    { size: 1_000, singular: "mille", plural: "mille" },
   ];
   let remaining = Math.floor(value);
   const parts: string[] = [];
@@ -275,25 +305,49 @@ function integerToWords(value: number): string {
     }
     const chunk = Math.floor(remaining / scale.size);
     remaining %= scale.size;
-    parts.push(`${wordsBelowThousand(chunk)} ${scale.label}`);
+
+    if (scale.size === 1_000 && chunk === 1) {
+      parts.push(scale.singular);
+      continue;
+    }
+
+    const chunkWords = belowThousandToFrench(chunk);
+    const scaleLabel = chunk > 1 ? scale.plural : scale.singular;
+    parts.push(`${chunkWords} ${scaleLabel}`);
   }
 
   if (remaining > 0) {
-    parts.push(wordsBelowThousand(remaining));
+    parts.push(belowThousandToFrench(remaining));
   }
 
   return parts.join(" ").trim() || "zero";
 }
 
-function amountToWords(value: number, currency: string) {
+function amountToFrenchWords(value: number, currency: string) {
   const safe = Number.isFinite(value) ? Math.max(0, value) : 0;
-  const whole = Math.floor(safe);
-  const cents = Math.round((safe - whole) * 100);
-  const major = integerToWords(whole);
+  const rounded = Math.round(safe * 100);
+  const whole = Math.floor(rounded / 100);
+  const cents = rounded % 100;
+
+  const currencyUpper = (currency || "MAD").toUpperCase();
+  const majorUnitByCurrency: Record<string, { singular: string; plural: string }> = {
+    MAD: { singular: "dirham", plural: "dirhams" },
+    EUR: { singular: "euro", plural: "euros" },
+    USD: { singular: "dollar", plural: "dollars" },
+  };
+  const majorUnits = majorUnitByCurrency[currencyUpper] || {
+    singular: currencyUpper.toLowerCase(),
+    plural: currencyUpper.toLowerCase(),
+  };
+  const majorLabel = whole > 1 ? majorUnits.plural : majorUnits.singular;
+  const majorWords = `${integerToFrenchWords(whole)} ${majorLabel}`.trim();
+
   if (cents <= 0) {
-    return `${major} ${currency}`.trim();
+    return majorWords;
   }
-  return `${major} ${currency} and ${integerToWords(cents)} cents`;
+
+  const minorLabel = cents > 1 ? "centimes" : "centime";
+  return `${majorWords} et ${integerToFrenchWords(cents)} ${minorLabel}`;
 }
 
 function splitKeyPart(value: string) {
@@ -583,6 +637,10 @@ export async function listTemplateAssetsAction(input: ListTemplateAssetsInput = 
 
 export async function uploadTemplateAssetAction(formData: FormData) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
 
   const documentTypeValue = String(formData.get("documentType") ?? "").trim();
   const file = formData.get("file");
@@ -693,6 +751,10 @@ export async function uploadTemplateAssetAction(formData: FormData) {
 
 export async function setDefaultTemplateAssetAction(input: SetDefaultTemplateInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const templateId = input.templateId.trim();
   if (!templateId) {
     return { ok: false as const, error: "Template id is required." };
@@ -732,6 +794,10 @@ export async function setDefaultTemplateAssetAction(input: SetDefaultTemplateInp
 
 export async function deleteTemplateAssetAction(input: DeleteTemplateInput) {
   const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
   const templateId = input.templateId.trim();
   if (!templateId) {
     return { ok: false as const, error: "Template id is required." };
@@ -896,6 +962,7 @@ async function buildDocumentExportPayload(companyId: string, documentId: string)
   const dueDateLabel = toDateLabel(document.dueDate);
   const currency = document.currency || "MAD";
   const totalTTC = toNumeric(document.totalTTC);
+  const totalTTCInWordsFr = amountToFrenchWords(totalTTC, currency);
   const tvaRateRaw =
     metadata.tvaRate ??
     (document.lineItems.length ? toNumeric(document.lineItems[0].vatRate) : 20);
@@ -1011,7 +1078,8 @@ async function buildDocumentExportPayload(companyId: string, documentId: string)
       subtotal_ht: toNumeric(document.subtotalHT),
       total_tax: toNumeric(document.totalTax),
       total_ttc: totalTTC,
-      total_ttc_in_words: amountToWords(totalTTC, currency),
+      total_ttc_in_words: totalTTCInWordsFr,
+      total_ttc_in_words_fr: totalTTCInWordsFr,
       amount_paid: toNumeric(document.amountPaid),
       amount_due: toNumeric(document.amountDue),
       tva_rate: tvaRate,
@@ -1052,6 +1120,8 @@ async function buildDocumentExportPayload(companyId: string, documentId: string)
     clientVat: (payloadBase.client as Record<string, unknown>).vat || "",
     totalTTC: (payloadBase.totals as Record<string, unknown>).total_ttc || 0,
     totalTtcInWords: (payloadBase.totals as Record<string, unknown>).total_ttc_in_words || "",
+    total_ttc_in_words: (payloadBase.totals as Record<string, unknown>).total_ttc_in_words || "",
+    totalTtcInWordsFr: (payloadBase.totals as Record<string, unknown>).total_ttc_in_words_fr || "",
     projectNumber,
     missionLabel,
     site,

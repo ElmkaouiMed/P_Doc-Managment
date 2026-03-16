@@ -16,6 +16,22 @@ export function PwaRegistrar() {
       return;
     }
 
+    const clearServiceWorkersAndCaches = async () => {
+      try {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map((registration) => registration.unregister()));
+        const cacheNames = await caches.keys();
+        await Promise.all(cacheNames.map((cacheName) => caches.delete(cacheName)));
+      } catch {
+        // Ignore cleanup errors in dev.
+      }
+    };
+
+    if (process.env.NODE_ENV !== "production") {
+      void clearServiceWorkersAndCaches();
+      return;
+    }
+
     const register = async () => {
       try {
         await navigator.serviceWorker.register("/sw.js", { scope: "/" });
@@ -40,4 +56,3 @@ export function PwaRegistrar() {
 
   return null;
 }
-

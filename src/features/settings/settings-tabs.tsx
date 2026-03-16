@@ -34,8 +34,8 @@ import {
   listTemplateAssetsAction,
   setDefaultTemplateAssetAction,
   uploadTemplateAssetAction,
-  type TemplateAssetRow,
 } from "@/features/templates/actions";
+import type { TemplateAssetRow } from "@/features/templates/types";
 import {
   getCompanyBusinessConfigAction,
   getCompanyDocumentUnitsAction,
@@ -67,27 +67,120 @@ const tabs = [
 
 type TabKey = (typeof tabs)[number]["key"];
 
+const SETTINGS_PANEL_CLASS = "space-y-4 rounded-md border border-border bg-card/60 p-3 sm:p-4";
+
+type ResponsiveTabStripProps<T extends string> = {
+  items: Array<{ key: T; label: string }>;
+  value: T;
+  onChange: (value: T) => void;
+  gridClassName: string;
+  surfaceClassName?: string;
+};
+
+function ResponsiveTabStrip<T extends string>({
+  items,
+  value,
+  onChange,
+  gridClassName,
+  surfaceClassName = "border border-border bg-background/30",
+}: ResponsiveTabStripProps<T>) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const activeItem = items.find((item) => item.key === value) || items[0];
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onMouseDown = (event: MouseEvent) => {
+      if (!containerRef.current || containerRef.current.contains(event.target as Node)) {
+        return;
+      }
+      setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className="space-y-2">
+      <div ref={containerRef} className="relative sm:hidden">
+        <button
+          type="button"
+          onClick={() => setOpen((current) => !current)}
+          className="inline-flex w-full items-center justify-between gap-2 rounded-md border border-border bg-background/60 px-3 py-2 text-xs font-semibold text-foreground transition hover:border-primary/40"
+          aria-label="Toggle tab menu"
+          aria-expanded={open}
+        >
+          <span className="truncate">{activeItem?.label}</span>
+          <span className={cn("text-[11px] text-muted-foreground transition", open ? "rotate-180" : "")}>▾</span>
+        </button>
+
+        {open ? (
+          <div className="absolute inset-x-0 z-30 mt-2 rounded-md border border-border bg-card/95 p-1 shadow-xl backdrop-blur-sm">
+            <div className="max-h-64 overflow-y-auto">
+              {items.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => {
+                    onChange(item.key);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    "flex w-full items-center rounded-sm px-3 py-2 text-left text-xs font-semibold transition",
+                    value === item.key ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
+                  )}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <div className={cn("hidden gap-2 rounded-md p-2 sm:grid", gridClassName, surfaceClassName)}>
+        {items.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            onClick={() => onChange(item.key)}
+            className={cn(
+              "rounded-sm px-2.5 py-1.5 text-[11px] font-semibold transition",
+              value === item.key ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
+            )}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function SettingsTabs() {
   const [active, setActive] = useState<TabKey>("general");
   const { t } = useI18n();
 
   return (
     <section className="space-y-4">
-      <div className="grid gap-2 rounded-md border border-border bg-card/70 p-2 sm:grid-cols-3 lg:grid-cols-6">
-        {tabs.map((tab) => (
-          <button
-            key={tab.key}
-            type="button"
-            onClick={() => setActive(tab.key)}
-            className={cn(
-              "rounded-sm px-3 py-2 text-xs font-semibold transition",
-              active === tab.key ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-            )}
-          >
-            {t(tab.labelKey)}
-          </button>
-        ))}
-      </div>
+      <ResponsiveTabStrip
+        items={tabs.map((tab) => ({ key: tab.key, label: t(tab.labelKey) }))}
+        value={active}
+        onChange={setActive}
+        gridClassName="sm:grid-cols-3 lg:grid-cols-6"
+        surfaceClassName="border border-border bg-card/70"
+      />
 
       {active === "config" ? <ConfigTab /> : null}
       {active === "general" ? <GeneralInfoTab /> : null}
@@ -134,7 +227,16 @@ const TEMPLATE_VARIABLE_BASE_GROUPS = [
   },
   {
     labelKey: "settings.templates.files.variables.groups.totals",
-    values: ["totals.subtotal_ht", "totals.total_tax", "totals.total_ttc", "totals.total_ttc_in_words", "totals.amount_paid", "totals.amount_due", "totals.tva_rate"],
+    values: [
+      "totals.subtotal_ht",
+      "totals.total_tax",
+      "totals.total_ttc",
+      "totals.total_ttc_in_words",
+      "totals.total_ttc_in_words_fr",
+      "totals.amount_paid",
+      "totals.amount_due",
+      "totals.tva_rate",
+    ],
   },
   {
     labelKey: "settings.templates.files.variables.groups.company",
@@ -229,7 +331,8 @@ const HTML_TABLE_ROW_SNIPPET = `{% for row in lines %}
 
 const DOCX_TOTALS_SNIPPET = `Total HT: {{ totals.subtotal_ht }}
 Total TVA ({{ totals.tva_rate }}%): {{ totals.total_tax }}
-Total TTC: {{ totals.total_ttc }}`;
+Total TTC: {{ totals.total_ttc }}
+Total TTC en lettres (FR): {{ totals.total_ttc_in_words }}`;
 
 function ConfigTab() {
   const { success, error } = useToast();
@@ -295,7 +398,7 @@ function ConfigTab() {
   };
 
   return (
-    <div className="space-y-4 rounded-md border border-border bg-card/60 p-4">
+    <div className={SETTINGS_PANEL_CLASS}>
       <div className="space-y-2">
         <h3 className="text-sm font-semibold text-foreground">{t("settings.config.title")}</h3>
         <p className="text-xs text-muted-foreground">
@@ -341,7 +444,7 @@ function ConfigTab() {
         <p className="text-[11px] text-muted-foreground">{t("settings.config.autoFillArticlePriceHint")}</p>
       </div>
 
-      <div className="flex items-center justify-between rounded-md border border-border bg-background/30 px-3 py-2">
+      <div className="flex flex-col items-start gap-2 rounded-md border border-border bg-background/30 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-xs text-muted-foreground">{t("settings.config.defaultTvaHint")}</p>
         <UiButton type="button" size="sm" variant="primary" onClick={saveConfig}>
           {t("settings.config.save")}
@@ -413,7 +516,7 @@ function GeneralInfoTab() {
   };
 
   return (
-    <div className="space-y-4 rounded-md border border-border bg-card/60 p-4">
+    <div className={SETTINGS_PANEL_CLASS}>
       <div className="grid gap-4 md:grid-cols-3">
         <FormField type="text" label={t("settings.general.legalName")} value={values.legalName} onChange={(value) => updateValue("legalName", value)} placeholder={t("settings.general.placeholders.legalName")} />
         <FormField type="text" label={t("settings.general.ice")} value={values.ice} onChange={(value) => updateValue("ice", value)} placeholder={t("settings.general.placeholders.ice")} />
@@ -557,29 +660,16 @@ function EmailTab() {
   });
 
   return (
-    <div className="space-y-4 rounded-md border border-border bg-card/60 p-4">
-      <div className="grid gap-2 rounded-md border border-border bg-background/30 p-2 sm:grid-cols-2">
-        <button
-          type="button"
-          onClick={() => setEmailSubTab("config")}
-          className={cn(
-            "rounded-sm px-3 py-2 text-xs font-semibold transition",
-            emailSubTab === "config" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-          )}
-        >
-          {t("settings.emails.tabs.config")}
-        </button>
-        <button
-          type="button"
-          onClick={() => setEmailSubTab("templates")}
-          className={cn(
-            "rounded-sm px-3 py-2 text-xs font-semibold transition",
-            emailSubTab === "templates" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-          )}
-        >
-          {t("settings.emails.tabs.templates")}
-        </button>
-      </div>
+    <div className={SETTINGS_PANEL_CLASS}>
+      <ResponsiveTabStrip
+        items={[
+          { key: "config", label: t("settings.emails.tabs.config") },
+          { key: "templates", label: t("settings.emails.tabs.templates") },
+        ]}
+        value={emailSubTab}
+        onChange={setEmailSubTab}
+        gridClassName="sm:grid-cols-2"
+      />
 
       {emailSubTab === "config" ? (
         <div className="space-y-3 rounded-md border border-border bg-background/20 p-3">
@@ -1095,7 +1185,7 @@ function TemplatesTab() {
   };
 
   return (
-    <div className="grid gap-3 rounded-md border border-border bg-card/60 p-4 text-xs">
+    <div className={cn(SETTINGS_PANEL_CLASS, "grid gap-3 text-xs")}>
       <p className="text-muted-foreground">
         {t("settings.templates.description")}
       </p>
@@ -1117,38 +1207,16 @@ function TemplatesTab() {
         </div>
       </div>
 
-      <div className="grid gap-2 rounded-md border border-border bg-background/30 p-2 sm:grid-cols-3">
-        <button
-          type="button"
-          onClick={() => setInnerTab("files")}
-          className={cn(
-            "rounded-sm px-3 py-2 text-xs font-semibold transition",
-            innerTab === "files" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-          )}
-        >
-          {t("settings.templates.tabs.files")}
-        </button>
-        <button
-          type="button"
-          onClick={() => setInnerTab("columns")}
-          className={cn(
-            "rounded-sm px-3 py-2 text-xs font-semibold transition",
-            innerTab === "columns" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-          )}
-        >
-          {t("settings.templates.tabs.columns")}
-        </button>
-        <button
-          type="button"
-          onClick={() => setInnerTab("units")}
-          className={cn(
-            "rounded-sm px-3 py-2 text-xs font-semibold transition",
-            innerTab === "units" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-          )}
-        >
-          {t("settings.templates.tabs.units")}
-        </button>
-      </div>
+      <ResponsiveTabStrip
+        items={[
+          { key: "files", label: t("settings.templates.tabs.files") },
+          { key: "columns", label: t("settings.templates.tabs.columns") },
+          { key: "units", label: t("settings.templates.tabs.units") },
+        ]}
+        value={innerTab}
+        onChange={setInnerTab}
+        gridClassName="sm:grid-cols-3"
+      />
 
       {innerTab === "files" ? (
         <div className="space-y-3 rounded-md border border-border bg-background/20 p-3">
@@ -1185,13 +1253,14 @@ function TemplatesTab() {
               <p className="mt-1">{t("settings.templates.files.linesLoopHintDescription")}</p>
               <div className="mt-3 grid gap-3 md:grid-cols-2">
                 <div className="rounded-md border border-border bg-background/60 p-2">
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="font-semibold text-foreground">{t("settings.templates.files.tableRowSnippetTitle")}</p>
                     <UiButton
                       type="button"
                       size="xs"
                       variant="ghost"
                       onClick={() => void copyTemplateSnippet(tableRowSnippet)}
+                      className="w-full sm:w-auto"
                     >
                       {t("settings.templates.files.copySnippet")}
                     </UiButton>
@@ -1199,13 +1268,14 @@ function TemplatesTab() {
                   <pre className="mt-2 overflow-x-auto text-[11px] text-foreground">{tableRowSnippet}</pre>
                 </div>
                 <div className="rounded-md border border-border bg-background/60 p-2">
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="font-semibold text-foreground">{t("settings.templates.files.totalsSnippetTitle")}</p>
                     <UiButton
                       type="button"
                       size="xs"
                       variant="ghost"
                       onClick={() => void copyTemplateSnippet(DOCX_TOTALS_SNIPPET)}
+                      className="w-full sm:w-auto"
                     >
                       {t("settings.templates.files.copySnippet")}
                     </UiButton>
@@ -1215,9 +1285,9 @@ function TemplatesTab() {
               </div>
             </div>
             <div className="space-y-2 rounded-md border border-border bg-background/30 p-3 md:col-span-2">
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("settings.templates.files.variablesLibrary")}</p>
-                <UiButton type="button" size="xs" variant="ghost" onClick={clearTemplateVariables}>
+                <UiButton type="button" size="xs" variant="ghost" onClick={clearTemplateVariables} className="w-full sm:w-auto">
                   {t("settings.templates.files.clearVariables")}
                 </UiButton>
               </div>
@@ -1229,7 +1299,10 @@ function TemplatesTab() {
                       <button
                         key={variableName}
                         type="button"
-                        onClick={() => toggleTemplateVariable(variableName)}
+                        onClick={() => {
+                          toggleTemplateVariable(variableName);
+                          void copyTemplateSnippet(`{{${variableName}}}`);
+                        }}
                         className={cn(
                           "rounded-md border px-2 py-1 text-[11px] transition",
                           selectedTemplateVariables.has(variableName)
@@ -1301,11 +1374,11 @@ function TemplatesTab() {
             />
           </div>
 
-          <div className="flex items-center justify-end gap-2">
-            <UiButton type="button" size="sm" variant="ghost" onClick={() => void refreshTemplates()}>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <UiButton type="button" size="sm" variant="ghost" onClick={() => void refreshTemplates()} className="w-full sm:w-auto">
               {t("settings.templates.files.refresh")}
             </UiButton>
-            <UiButton type="button" size="sm" variant="primary" disabled={uploadingTemplate} onClick={() => void uploadTemplate()}>
+            <UiButton type="button" size="sm" variant="primary" disabled={uploadingTemplate} onClick={() => void uploadTemplate()} className="w-full sm:w-auto">
               {t("settings.templates.files.upload")}
             </UiButton>
           </div>
@@ -1316,8 +1389,8 @@ function TemplatesTab() {
             ) : templates.length ? (
               templates.map((item) => (
                 <article key={item.id} className="space-y-2 rounded-md border border-border bg-card/70 p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
                       <p className="text-sm font-semibold text-foreground">{item.name}</p>
                       <p className="text-[11px] text-muted-foreground">{item.description || "-"}</p>
                     </div>
@@ -1330,23 +1403,23 @@ function TemplatesTab() {
                       ) : null}
                     </div>
                   </div>
-                  <div className="grid gap-2 text-[11px] text-muted-foreground md:grid-cols-3">
+                  <div className="grid gap-2 text-[11px] text-muted-foreground sm:grid-cols-2 md:grid-cols-3">
                     <p>{t("settings.templates.files.version")}: {item.versionNumber}</p>
-                    <p>{t("settings.templates.files.fileName")}: {item.fileName || "-"}</p>
+                    <p className="break-all">{t("settings.templates.files.fileName")}: {item.fileName || "-"}</p>
                     <p>{t("settings.templates.files.fileSize")}: {bytesLabel(item.fileSize)}</p>
                   </div>
                   {item.variables.length ? (
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="break-all text-[11px] text-muted-foreground">
                       {t("settings.templates.files.variables")}: {item.variables.join(", ")}
                     </p>
                   ) : null}
-                  <div className="flex items-center justify-end gap-2">
+                  <div className="flex flex-wrap items-center justify-end gap-2">
                     {!item.isDefault ? (
-                      <UiButton type="button" size="xs" variant="outline" onClick={() => void setAsDefaultTemplate(item.id)}>
+                      <UiButton type="button" size="xs" variant="outline" onClick={() => void setAsDefaultTemplate(item.id)} className="w-full sm:w-auto">
                         {t("settings.templates.files.makeDefault")}
                       </UiButton>
                     ) : null}
-                    <UiButton type="button" size="xs" variant="danger" onClick={() => void deleteTemplate(item.id, item.name)}>
+                    <UiButton type="button" size="xs" variant="danger" onClick={() => void deleteTemplate(item.id, item.name)} className="w-full sm:w-auto">
                       {t("common.delete")}
                     </UiButton>
                   </div>
@@ -1363,7 +1436,7 @@ function TemplatesTab() {
         <div className="space-y-2 rounded-md border border-border bg-background/20 p-3">
         <p className="text-muted-foreground">{t("settings.templates.lineColumns")}</p>
         {columns.map((column) => (
-          <div key={column.id} className="grid items-end gap-2 rounded-sm border border-border bg-background/30 p-2 md:grid-cols-[1.2fr_1fr_1.4fr_auto_auto_auto]">
+          <div key={column.id} className="grid items-end gap-2 rounded-sm border border-border bg-background/30 p-2 sm:grid-cols-2 lg:grid-cols-[1.2fr_1fr_1.4fr_auto_auto_auto]">
             <div className="text-foreground">
               <p className="font-semibold">{column.label}</p>
               <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{column.id}</p>
@@ -1395,7 +1468,7 @@ function TemplatesTab() {
               checked={column.enabled}
               disabled={column.id === "designation"}
               onCheckedChange={(checked) => updateColumn(column.id, { enabled: checked })}
-              className="px-2 py-1.5 text-[11px]"
+              className="px-2 py-1.5 text-[11px] sm:col-span-1"
             />
             <FormField
               type="checkbox"
@@ -1403,9 +1476,9 @@ function TemplatesTab() {
               checked={column.required}
               disabled={column.id === "designation"}
               onCheckedChange={(checked) => updateColumn(column.id, { required: checked })}
-              className="px-2 py-1.5 text-[11px]"
+              className="px-2 py-1.5 text-[11px] sm:col-span-1"
             />
-            <UiButton type="button" size="sm" variant="danger" iconOnly iconName="remove" disabled={column.system} onClick={() => removeColumn(column.id)} />
+            <UiButton type="button" size="sm" variant="danger" iconOnly iconName="remove" disabled={column.system} onClick={() => removeColumn(column.id)} className="justify-self-start sm:justify-self-end" />
           </div>
         ))}
         </div>
@@ -1413,7 +1486,7 @@ function TemplatesTab() {
 
       {innerTab === "columns" ? (
         <div className="space-y-2 rounded-md border border-border bg-background/20 p-3">
-          <div className="grid items-end gap-2 md:grid-cols-[2fr_1fr_1fr_auto]">
+          <div className="grid items-end gap-2 sm:grid-cols-2 lg:grid-cols-[2fr_1fr_1fr_auto]">
             <FormField
               type="text"
               label={t("settings.templates.newColumnLabel")}
@@ -1432,7 +1505,7 @@ function TemplatesTab() {
               }))}
             />
             <FormField type="checkbox" label={t("settings.templates.required")} checked={newRequired} onCheckedChange={setNewRequired} />
-            <UiButton type="button" size="sm" iconOnly iconName="plus" variant="outline" onClick={addCustomColumn}/>
+            <UiButton type="button" size="sm" iconOnly iconName="plus" variant="outline" onClick={addCustomColumn} className="justify-self-start sm:justify-self-end"/>
           </div>
           {newType === "select" ? (
             <FormField
@@ -1447,7 +1520,7 @@ function TemplatesTab() {
       ) : null}
 
       {innerTab === "columns" ? (
-        <div className="flex items-center justify-between rounded-md border border-border bg-background/30 px-3 py-2">
+        <div className="flex flex-col items-start gap-2 rounded-md border border-border bg-background/30 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-muted-foreground">{t("settings.templates.exportHint")}</p>
           <UiButton type="button" size="sm" variant="primary" onClick={saveColumns}>
             {t("settings.templates.saveColumns")}
@@ -1466,10 +1539,10 @@ function TemplatesTab() {
               </span>
             ))}
           </div>
-          <div className="grid items-end gap-2 md:grid-cols-[1fr_auto_auto]">
+          <div className="grid items-end gap-2 sm:grid-cols-2 lg:grid-cols-[1fr_auto_auto]">
             <FormField type="text" label={t("settings.templates.units.newUnit")} value={newUnit} onChange={setNewUnit} placeholder={t("settings.templates.units.placeholder")} />
-            <UiButton type="button" size="sm" iconName="plus" label={t("settings.templates.units.add")} variant="outline" onClick={addUnit} />
-            <UiButton type="button" size="sm" variant="primary" onClick={saveUnits}>
+            <UiButton type="button" size="sm" iconName="plus" label={t("settings.templates.units.add")} variant="outline" onClick={addUnit} className="w-full sm:w-auto" />
+            <UiButton type="button" size="sm" variant="primary" onClick={saveUnits} className="w-full sm:w-auto">
               {t("settings.templates.units.save")}
             </UiButton>
           </div>
@@ -1563,14 +1636,14 @@ function NotificationsTab() {
 
   if (loading || !values) {
     return (
-      <div className="space-y-4 rounded-md border border-border bg-card/60 p-4">
+      <div className={SETTINGS_PANEL_CLASS}>
         <p className="text-xs text-muted-foreground">{t("settings.notifications.loading")}</p>
       </div>
     );
   }
 
   return (
-    <div className="space-y-4 rounded-md border border-border bg-card/60 p-4">
+    <div className={SETTINGS_PANEL_CLASS}>
       <div className="space-y-2 rounded-md border border-border bg-background/20 p-3">
         <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("settings.notifications.channels")}</p>
         <div className="grid gap-2 md:grid-cols-2">
@@ -1711,7 +1784,7 @@ function ExportsTab() {
   };
 
   return (
-    <div className="space-y-4 rounded-md border border-border bg-card/60 p-4">
+    <div className={SETTINGS_PANEL_CLASS}>
       <div className="grid gap-4 md:grid-cols-2">
         <div className="rounded-md border border-border bg-background/20 p-3">
           <p className="mb-2 text-xs text-muted-foreground">{t("settings.exports.enabledFormats")}</p>

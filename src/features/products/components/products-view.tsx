@@ -4,6 +4,7 @@ import { AiSearchIcon, Cancel01Icon, Edit02Icon, EyeIcon, PackageIcon } from "@h
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ActionMenu } from "@/components/ui/action-menu";
+import { StatCard } from "@/components/common/stat-card";
 import { FilterField } from "@/components/ui/filter-field";
 import { FormField } from "@/components/ui/form-field";
 import { HugIcon } from "@/components/ui/hug-icon";
@@ -39,12 +40,13 @@ type ProductRow = {
 
 type ProductsViewProps = {
   products: ProductRow[];
+  currency: string;
 };
 
 const CATALOG_TEMPLATE_COLUMNS = ["sku", "name", "description", "unit", "price_ht", "vat_rate", "is_active"] as const;
 const CATALOG_TEMPLATE_SAMPLE = ["SKU-001", "Article demo", "Optional note", "u", "100.00", "20", "true"] as const;
 
-export function ProductsView({ products }: ProductsViewProps) {
+export function ProductsView({ products, currency }: ProductsViewProps) {
   const { success, error, info } = useToast();
   const { t } = useI18n();
   const { confirm } = useMsgBox();
@@ -56,7 +58,9 @@ export function ProductsView({ products }: ProductsViewProps) {
   const [usageFilter, setUsageFilter] = useState("all");
   const [catalogFile, setCatalogFile] = useState<File | null>(null);
   const [importingCatalog, setImportingCatalog] = useState(false);
+  const [importModalOpen, setImportModalOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ProductViewMode>("table");
+  const [isSmallScreen, setIsSmallScreen] = useState(false);
   const [detailsProductId, setDetailsProductId] = useState<string | null>(null);
   const [editProductId, setEditProductId] = useState<string | null>(null);
   const [isEditSaving, setIsEditSaving] = useState(false);
@@ -110,6 +114,17 @@ export function ProductsView({ products }: ProductsViewProps) {
   useEffect(() => {
     setRows(products);
   }, [products]);
+
+  useEffect(() => {
+    const syncViewport = () => {
+      setIsSmallScreen(window.innerWidth < 640);
+    };
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
+    return () => {
+      window.removeEventListener("resize", syncViewport);
+    };
+  }, []);
 
   const setMode = (mode: ProductViewMode) => {
     setViewMode(mode);
@@ -174,6 +189,15 @@ export function ProductsView({ products }: ProductsViewProps) {
       const first = result.errors[0];
       info(t("products.import.toasts.partialIssues"), `Row ${first.rowNumber}: ${first.message}`);
     }
+    resetCatalogFileInput();
+    setImportModalOpen(false);
+  };
+
+  const closeImportModal = () => {
+    if (importingCatalog) {
+      return;
+    }
+    setImportModalOpen(false);
     resetCatalogFileInput();
   };
 
@@ -334,6 +358,8 @@ export function ProductsView({ products }: ProductsViewProps) {
     />
   );
 
+  const activeViewMode: ProductViewMode = isSmallScreen ? "grid" : viewMode;
+
   return (
     <div className="space-y-4">
       <div className="relative z-40 space-y-3 rounded-md border border-border bg-card/70 p-4">
@@ -362,7 +388,7 @@ export function ProductsView({ products }: ProductsViewProps) {
               { value: "unused", label: t("products.filters.unused") },
             ]}
           />
-          <div className="flex items-center gap-2">
+          <div className="hidden items-center gap-2 sm:flex">
             <UiButton
               type="button"
               size="xs"
@@ -370,7 +396,7 @@ export function ProductsView({ products }: ProductsViewProps) {
               iconName="table"
               aria-label={t("common.tableView")}
               title={t("common.tableView")}
-              variant={viewMode === "table" ? "primary" : "ghost"}
+              variant={activeViewMode === "table" ? "primary" : "ghost"}
               onClick={() => setMode("table")}
             />
             <UiButton
@@ -380,7 +406,7 @@ export function ProductsView({ products }: ProductsViewProps) {
               iconName="grid"
               aria-label={t("common.gridView")}
               title={t("common.gridView")}
-              variant={viewMode === "grid" ? "primary" : "ghost"}
+              variant={activeViewMode === "grid" ? "primary" : "ghost"}
               onClick={() => setMode("grid")}
             />
           </div>
@@ -388,11 +414,11 @@ export function ProductsView({ products }: ProductsViewProps) {
       </div>
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <SummaryCard label={t("products.summary.totalProducts")} value={String(stats.total)} />
-        <SummaryCard label={t("products.summary.catalogHtSum")} value={`${stats.catalogHT.toFixed(2)} MAD`} />
-        <SummaryCard label={t("products.summary.usedInDocuments")} value={String(stats.usedInDocs)} />
-        <SummaryCard label={t("products.summary.soldQuantity")} value={stats.soldQuantity.toFixed(3)} />
-        <SummaryCard label={t("products.summary.revenueHt")} value={`${stats.revenueHT.toFixed(2)} MAD`} />
+        <StatCard label={t("products.summary.totalProducts")} value={String(stats.total)} />
+        <StatCard label={t("products.summary.catalogHtSum")} amount={stats.catalogHT} currency={currency} metaTone="positive" />
+        <StatCard label={t("products.summary.usedInDocuments")} value={String(stats.usedInDocs)} />
+        <StatCard label={t("products.summary.soldQuantity")} value={stats.soldQuantity.toFixed(3)} />
+        <StatCard label={t("products.summary.revenueHt")} amount={stats.revenueHT} currency={currency} metaTone="positive" />
       </div>
 
       <div className="rounded-md border border-border bg-card/70 p-4">
@@ -400,47 +426,14 @@ export function ProductsView({ products }: ProductsViewProps) {
           <div className="space-y-1">
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">{t("products.import.title")}</p>
             <p className="text-xs text-muted-foreground">{t("products.import.subtitle")}</p>
-            <p className="text-[11px] text-muted-foreground">{t("products.import.columns")}: {CATALOG_TEMPLATE_COLUMNS.join(", ")}</p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <UiButton type="button" size="sm" variant="outline" iconName="export" onClick={downloadCatalogTemplate}>
-              {t("products.import.downloadTemplate")}
-            </UiButton>
-            <UiButton
-              type="button"
-              size="sm"
-              variant="outline"
-              iconName="import"
-              onClick={() => importFileInputRef.current?.click()}
-            >
-              {catalogFile ? t("products.import.replaceFile") : t("products.import.selectFile")}
-            </UiButton>
-            <UiButton
-              type="button"
-              size="sm"
-              variant="primary"
-              onClick={() => void importCatalog()}
-              disabled={!catalogFile || importingCatalog}
-            >
-              {importingCatalog ? t("products.import.importing") : t("products.import.importNow")}
-            </UiButton>
-          </div>
+          <UiButton type="button" size="sm" variant="primary" iconName="import" onClick={() => setImportModalOpen(true)}>
+            {t("products.import.importNow")}
+          </UiButton>
         </div>
-        <input
-          ref={importFileInputRef}
-          type="file"
-          accept=".csv,.xls,.xlsx"
-          className="hidden"
-          onChange={(event) => setCatalogFile(event.target.files?.[0] ?? null)}
-        />
-        <p className="mt-2 text-[11px] text-muted-foreground">
-          {catalogFile
-            ? t("products.import.selectedFile").replace("{name}", catalogFile.name)
-            : t("products.import.acceptedFormats")}
-        </p>
       </div>
 
-      {viewMode === "table" ? (
+      {activeViewMode === "table" ? (
         <div className="overflow-x-auto rounded-md border border-border bg-card/70">
           <table className="w-full text-sm">
             <thead className="bg-background/70 text-xs uppercase tracking-[0.2em] text-muted-foreground">
@@ -482,46 +475,44 @@ export function ProductsView({ products }: ProductsViewProps) {
           </table>
         </div>
       ) : (
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-3">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {filtered.length ? (
             filtered.map((product) => (
-              <article key={product.id} className="space-y-2 rounded-md border border-border/80 bg-card/65 p-3">
-                <div className="flex items-start justify-between gap-1.5">
+              <article key={product.id} className="space-y-3 rounded-md border border-border bg-card/70 p-4">
+                <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold leading-tight text-foreground">{product.name}</p>
-                    <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{product.sku || "-"}</p>
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{product.unit}</p>
+                    <h3 className="truncate text-sm font-semibold text-foreground">{product.name}</h3>
                   </div>
                   {renderActions(product)}
                 </div>
 
-                <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-background/25 px-2 py-1.5 text-[11px]">
-                  <p className="flex items-center justify-between">
-                    <span className="text-muted-foreground">{t("products.table.unit")}</span>
-                    <span className="font-semibold text-foreground">{product.unit}</span>
-                  </p>
-                  <p className="flex items-center justify-between">
-                    <span className="text-muted-foreground">{t("products.table.tva")}</span>
-                    <span className="font-semibold text-foreground">{product.vatRate.toFixed(2)}%</span>
-                  </p>
-                  <p className="flex items-center justify-between">
-                    <span className="text-muted-foreground">{t("products.table.documents")}</span>
-                    <span className="font-semibold text-foreground">{product.documentsCount}</span>
-                  </p>
-                  <p className="flex items-center justify-between">
-                    <span className="text-muted-foreground">{t("products.table.soldQty")}</span>
-                    <span className="font-semibold text-foreground">{product.soldQuantity.toFixed(3)}</span>
-                  </p>
-                </div>
+                <p className="truncate text-xs text-muted-foreground">{product.description || product.sku || "-"}</p>
 
-                <p className="truncate text-[11px] text-muted-foreground">{product.description || "-"}</p>
-                <div className="flex items-center justify-between gap-2 text-[11px]">
-                  <span className="text-muted-foreground">{product.updatedAt.slice(0, 10)}</span>
-                  <span className="font-semibold text-foreground">{product.priceHT.toFixed(2)} MAD</span>
+                <div className="flex items-end justify-between gap-3">
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <p>
+                      {t("products.table.documents")}: <span className="font-semibold text-foreground">{product.documentsCount}</span>
+                    </p>
+                    <p>
+                      {t("products.table.soldQty")}: <span className="font-semibold text-foreground">{product.soldQuantity.toFixed(3)}</span>
+                    </p>
+                    <p>{product.updatedAt.slice(0, 10)}</p>
+                  </div>
+                  <div className="text-end">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("products.table.unitPriceHt")}</p>
+                    <p className="text-sm font-semibold text-foreground">
+                      {product.priceHT.toFixed(2)} {currency}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {t("products.table.tva")}: {product.vatRate.toFixed(2)}%
+                    </p>
+                  </div>
                 </div>
               </article>
             ))
           ) : (
-            <div className="rounded-md border border-border bg-card/70 p-6 text-center text-xs text-muted-foreground sm:col-span-2 lg:col-span-3 2xl:col-span-4">
+            <div className="rounded-md border border-border bg-card/70 p-6 text-center text-xs text-muted-foreground md:col-span-2 xl:col-span-3">
               {t("products.table.empty")}
             </div>
           )}
@@ -609,6 +600,71 @@ export function ProductsView({ products }: ProductsViewProps) {
           </div>
         </div>
       ) : null}
+
+      {importModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-2xl rounded-lg border border-border bg-card/95 p-4 shadow-2xl shadow-black/50">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.25em] text-muted-foreground">{t("products.import.title")}</p>
+                <h3 className="text-lg font-semibold text-foreground">{t("products.import.subtitle")}</h3>
+              </div>
+              <UiButton type="button" size="xs" variant="ghost" iconOnly iconName="close" onClick={closeImportModal} />
+            </div>
+
+            <div className="space-y-3 rounded-md border border-border bg-background/25 p-3">
+              <p className="text-[11px] text-muted-foreground">{t("products.import.columns")}: {CATALOG_TEMPLATE_COLUMNS.join(", ")}</p>
+              <UiButton type="button" size="sm" variant="outline" iconName="export" onClick={downloadCatalogTemplate}>
+                {t("products.import.downloadTemplate")}
+              </UiButton>
+            </div>
+
+            <div className="mt-3 space-y-2">
+              <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("products.import.acceptedFormats")}</p>
+              <div className="rounded-md border border-border bg-background/30 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <UiButton
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    iconName="import"
+                    onClick={() => importFileInputRef.current?.click()}
+                  >
+                    {catalogFile ? t("products.import.replaceFile") : t("products.import.selectFile")}
+                  </UiButton>
+                  <p className="text-[11px] text-muted-foreground">
+                    {catalogFile
+                      ? t("products.import.selectedFile").replace("{name}", catalogFile.name)
+                      : t("products.import.acceptedFormats")}
+                  </p>
+                </div>
+                <input
+                  ref={importFileInputRef}
+                  type="file"
+                  accept=".csv,.xls,.xlsx"
+                  className="hidden"
+                  onChange={(event) => setCatalogFile(event.target.files?.[0] ?? null)}
+                />
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+              <UiButton type="button" size="sm" variant="ghost" onClick={closeImportModal}>
+                {t("common.cancel")}
+              </UiButton>
+              <UiButton
+                type="button"
+                size="sm"
+                variant="primary"
+                onClick={() => void importCatalog()}
+                disabled={!catalogFile || importingCatalog}
+              >
+                {importingCatalog ? t("products.import.importing") : t("products.import.importNow")}
+              </UiButton>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -647,15 +703,6 @@ function mergeImportedRows(
     });
   }
   return Array.from(byId.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-}
-
-function SummaryCard({ label, value }: { label: string; value: string }) {
-  return (
-    <article className="rounded-md border border-border bg-card/70 p-4">
-      <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{label}</p>
-      <p className="mt-2 text-2xl font-semibold text-foreground">{value}</p>
-    </article>
-  );
 }
 
 function InfoCard({ label, value }: { label: string; value: string }) {
