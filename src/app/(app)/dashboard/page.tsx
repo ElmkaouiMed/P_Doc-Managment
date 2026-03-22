@@ -1,8 +1,11 @@
 import { requireAuthContext } from "@/features/auth/lib/session";
-import { DashboardView, type DashboardKpi } from "@/features/dashboard/components/dashboard-view";
+import { DashboardView, type DashboardFunnelDropOff, type DashboardFunnelLeadTime, type DashboardFunnelStep, type DashboardKpi } from "@/features/dashboard/components/dashboard-view";
+import { readFunnelSummary } from "@/features/analytics/lib/funnel-events-reader";
+import type { FunnelEventName } from "@/features/analytics/lib/funnel-event-names";
 import { AppLocale } from "@/i18n/messages";
 import { getServerI18n } from "@/i18n/server";
 import { prisma } from "@/lib/db";
+import { PageEducationBanner } from "@/components/marketing/page-education-banner";
 
 function toNumber(value: unknown) {
   const parsed = Number(value);
@@ -44,6 +47,29 @@ const STATUS_KEY_BY_VALUE: Record<string, string> = {
   OVERDUE: "documents.status.overdue",
   CANCELLED: "documents.status.cancelled",
 };
+const FUNNEL_SEQUENCE: FunnelEventName[] = [
+  "landing_view",
+  "signup_start",
+  "signup_complete",
+  "trial_start",
+  "first_document_created",
+  "payment_proof_submitted",
+  "account_activated",
+];
+const FUNNEL_LABEL_KEY_BY_EVENT: Record<FunnelEventName, string> = {
+  landing_view: "dashboard.funnel.steps.landing_view",
+  signup_start: "dashboard.funnel.steps.signup_start",
+  signup_complete: "dashboard.funnel.steps.signup_complete",
+  trial_start: "dashboard.funnel.steps.trial_start",
+  first_document_created: "dashboard.funnel.steps.first_document_created",
+  payment_proof_submitted: "dashboard.funnel.steps.payment_proof_submitted",
+  account_activated: "dashboard.funnel.steps.account_activated",
+  assist_modal_open: "dashboard.funnel.steps.assist_modal_open",
+  assist_request_submitted: "dashboard.funnel.steps.assist_request_submitted",
+  education_banner_view: "dashboard.funnel.steps.education_banner_view",
+  education_video_click: "dashboard.funnel.steps.education_video_click",
+  education_help_click: "dashboard.funnel.steps.education_help_click",
+};
 
 export default async function DashboardPage() {
   const auth = await requireAuthContext();
@@ -54,7 +80,7 @@ export default async function DashboardPage() {
   const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
   const sixMonthsStart = new Date(now.getFullYear(), now.getMonth() - 5, 1);
 
-  const [documents, paymentsForTrend, latestPaymentsRaw] = await Promise.all([
+  const [documents, paymentsForTrend, latestPaymentsRaw, funnelSummary] = await Promise.all([
     prisma.document.findMany({
       where: { companyId },
       select: {
@@ -94,19 +120,39 @@ export default async function DashboardPage() {
       where: { companyId },
       select: {
         id: true,
+        clientId: true,
         amount: true,
         paymentDate: true,
         method: true,
-        client: {
-          select: {
-            name: true,
-          },
-        },
       },
       orderBy: { paymentDate: "desc" },
       take: 8,
     }),
+    readFunnelSummary(30),
   ]);
+
+  const latestPaymentClientIds = Array.from(
+    new Set(
+      latestPaymentsRaw
+        .map((payment) => payment.clientId)
+        .filter((clientId): clientId is string => typeof clientId === "string" && clientId.length > 0),
+    ),
+  );
+
+  const latestPaymentClients = latestPaymentClientIds.length
+    ? await prisma.client.findMany({
+      where: {
+        companyId,
+        id: { in: latestPaymentClientIds },
+      },
+      select: {
+        id: true,
+        name: true,
+      },
+    })
+    : [];
+
+  const latestPaymentClientNameById = new Map(latestPaymentClients.map((client) => [client.id, client.name]));
 
   const summaryCurrency = documents.find((doc) => typeof doc.currency === "string" && doc.currency.trim().length > 0)?.currency || "MAD";
   const invoiceDocuments = documents.filter((doc) => doc.documentType === "FACTURE");
@@ -253,9 +299,49 @@ export default async function DashboardPage() {
   const latestPayments = latestPaymentsRaw.map((payment) => ({
     id: payment.id,
     date: formatDate(payment.paymentDate),
-    client: payment.client.name,
+    client: latestPaymentClientNameById.get(payment.clientId) || t("common.unknown"),
     method: payment.method,
     amountLabel: money(toNumber(payment.amount), summaryCurrency),
+  }));
+
+  const firstFunnelCount = funnelSummary.counts[FUNNEL_SEQUENCE[0]] || 0;
+  const funnelSteps: DashboardFunnelStep[] = FUNNEL_SEQUENCE.map((eventName, index) => {
+    const count = funnelSummary.counts[eventName] || 0;
+    const previousCount = index > 0 ? funnelSummary.counts[FUNNEL_SEQUENCE[index - 1]] || 0 : 0;
+    const rateFromPrevious = index > 0 && previousCount > 0 ? (count / previousCount) * 100 : null;
+    const rateFromStart = firstFunnelCount > 0 ? (count / firstFunnelCount) * 100 : null;
+    return {
+      key: eventName,
+      label: t(FUNNEL_LABEL_KEY_BY_EVENT[eventName]),
+      count,
+      rateFromPrevious,
+      rateFromStart,
+    };
+  });
+  const funnelWindowLabel = `${formatDate(funnelSummary.from)} -> ${formatDate(funnelSummary.to)}`;
+  const funnelLeadTime: DashboardFunnelLeadTime = {
+    samples: funnelSummary.leadTime.samples,
+    avgHours: funnelSummary.leadTime.avgHours,
+    medianHours: funnelSummary.leadTime.medianHours,
+    p90Hours: funnelSummary.leadTime.p90Hours,
+  };
+  const funnelDayDropOff: DashboardFunnelDropOff[] = funnelSummary.dayDropOff.map((row) => ({
+    key: `${row.fromEvent}_${row.toEvent}_day`,
+    fromLabel: t(FUNNEL_LABEL_KEY_BY_EVENT[row.fromEvent]),
+    toLabel: t(FUNNEL_LABEL_KEY_BY_EVENT[row.toEvent]),
+    fromCount: row.fromCount,
+    toCount: row.toCount,
+    conversionRate: row.conversionRate,
+    dropOffRate: row.dropOffRate,
+  }));
+  const funnelWeekDropOff: DashboardFunnelDropOff[] = funnelSummary.weekDropOff.map((row) => ({
+    key: `${row.fromEvent}_${row.toEvent}_week`,
+    fromLabel: t(FUNNEL_LABEL_KEY_BY_EVENT[row.fromEvent]),
+    toLabel: t(FUNNEL_LABEL_KEY_BY_EVENT[row.toEvent]),
+    fromCount: row.fromCount,
+    toCount: row.toCount,
+    conversionRate: row.conversionRate,
+    dropOffRate: row.dropOffRate,
   }));
 
   const kpis: DashboardKpi[] = [
@@ -318,6 +404,24 @@ export default async function DashboardPage() {
         </p>
       </header>
 
+      <PageEducationBanner
+        title={t("education.banner.dashboard.title")}
+        description={t("education.banner.dashboard.description")}
+        videoLabel={t("education.banner.common.watchVideo")}
+        videoHref="https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+        helpLabel={t("education.banner.common.needHelp")}
+        supportTitle={t("education.banner.support.title")}
+        supportDescription={t("education.banner.support.description")}
+        supportCallLabel={t("education.banner.support.call")}
+        supportCloseLabel={t("education.banner.support.close")}
+        sourceSection="education-dashboard"
+        checklist={[
+          t("education.banner.dashboard.point1"),
+          t("education.banner.dashboard.point2"),
+          t("education.banner.dashboard.point3"),
+        ]}
+      />
+
       <DashboardView
         currency={summaryCurrency}
         kpis={kpis}
@@ -327,6 +431,13 @@ export default async function DashboardPage() {
         dueInvoices={dueInvoices}
         topClients={topClients}
         latestPayments={latestPayments}
+        funnelSteps={funnelSteps}
+        funnelWindowLabel={funnelWindowLabel}
+        funnelTotalEvents={funnelSummary.totalEvents}
+        funnelLeadTime={funnelLeadTime}
+        funnelDayDropOff={funnelDayDropOff}
+        funnelWeekDropOff={funnelWeekDropOff}
+        showFunnel={false}
       />
     </div>
   );

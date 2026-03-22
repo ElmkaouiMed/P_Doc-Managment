@@ -1,4 +1,4 @@
-import { DocumentType, TemplateFormat } from "@prisma/client";
+import { DocumentType, TemplateFormat } from "@/lib/db-client";
 
 export type TemplateAssetRow = {
   id: string;

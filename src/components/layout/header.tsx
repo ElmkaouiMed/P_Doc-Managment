@@ -59,7 +59,7 @@ export function Header({ userName, userEmail, companyName, onToggleSidebar }: He
   };
 
   return (
-    <header className="relative flex h-16 items-center justify-between gap-4 rounded-md border border-border bg-card/80 px-4 shadow-sm backdrop-blur-md">
+    <header className="relative z-40 flex h-16 items-center justify-between gap-4 rounded-md border border-border bg-card/80 px-4 backdrop-blur-md">
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <div className="hidden lg:block">
           <p className="font-semibold text-foreground">{companyName}</p>

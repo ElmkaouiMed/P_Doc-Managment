@@ -1,7 +1,10 @@
-import { CompanyAccountStatus } from "@prisma/client";
+import { CompanyAccountStatus } from "@/lib/db-client";
+
+import { isDesktopMode } from "@/lib/runtime";
 
 export const TRIAL_PERIOD_DAYS = 14;
 export const DEFAULT_GRACE_PERIOD_DAYS = 5;
+export type CompanyAccessAction = "read" | "author";
 
 type LifecycleSnapshot = {
   accountStatus: CompanyAccountStatus;
@@ -41,6 +44,9 @@ export function buildTrialLifecycle(now = new Date()) {
 }
 
 export function deriveLifecycleStatus(snapshot: LifecycleSnapshot, now = new Date()): CompanyAccountStatus {
+  if (isDesktopMode()) {
+    return CompanyAccountStatus.ACTIVE_PAID;
+  }
   if (snapshot.accountStatus === CompanyAccountStatus.ACTIVE_PAID) {
     return CompanyAccountStatus.ACTIVE_PAID;
   }
@@ -70,10 +76,50 @@ export function deriveLifecycleStatus(snapshot: LifecycleSnapshot, now = new Dat
 }
 
 export function isWriteAccessAllowed(status: CompanyAccountStatus) {
-  return status === CompanyAccountStatus.TRIAL_ACTIVE || status === CompanyAccountStatus.ACTIVE_PAID;
+  return hasCompanyAccess(status, "author");
 }
 
-export function lifecycleAccessError(status: CompanyAccountStatus) {
+export function hasCompanyAccess(status: CompanyAccountStatus, action: CompanyAccessAction) {
+  if (isDesktopMode()) {
+    return true;
+  }
+  const matrix: Record<CompanyAccountStatus, Record<CompanyAccessAction, boolean>> = {
+    [CompanyAccountStatus.TRIAL_ACTIVE]: {
+      read: true,
+      author: true,
+    },
+    [CompanyAccountStatus.ACTIVE_PAID]: {
+      read: true,
+      author: true,
+    },
+    [CompanyAccountStatus.GRACE]: {
+      read: true,
+      author: false,
+    },
+    [CompanyAccountStatus.TRIAL_EXPIRED]: {
+      read: true,
+      author: false,
+    },
+    [CompanyAccountStatus.AWAITING_ACTIVATION]: {
+      read: true,
+      author: false,
+    },
+    [CompanyAccountStatus.LOCKED]: {
+      read: false,
+      author: false,
+    },
+  };
+
+  return matrix[status][action];
+}
+
+export function lifecycleAccessError(status: CompanyAccountStatus, action: CompanyAccessAction = "author") {
+  if (action === "read" && status === CompanyAccountStatus.LOCKED) {
+    return "Your account is suspended. Contact support to recover access.";
+  }
+  if (action === "read") {
+    return "This account status does not allow opening the workspace.";
+  }
   if (status === CompanyAccountStatus.GRACE) {
     return "Your trial has expired and the account is in grace period (read-only).";
   }

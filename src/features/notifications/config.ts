@@ -9,6 +9,7 @@ export type NotificationConfigInput = {
   notifyOverdue: boolean;
   notifyDraftStale: boolean;
   notifyStatusChanges: boolean;
+  notifyUsageLimits: boolean;
   notifyEmailFailures: boolean;
   notifyExportFailures: boolean;
   dueSoonDays: number;
@@ -29,6 +30,7 @@ export const DEFAULT_NOTIFICATION_CONFIG: NotificationConfigInput = {
   notifyOverdue: true,
   notifyDraftStale: true,
   notifyStatusChanges: true,
+  notifyUsageLimits: true,
   notifyEmailFailures: true,
   notifyExportFailures: true,
   dueSoonDays: 3,
@@ -90,6 +92,7 @@ export function sanitizeNotificationConfig(raw: unknown): NotificationConfigInpu
     notifyOverdue: parseBoolean(source.notifyOverdue, DEFAULT_NOTIFICATION_CONFIG.notifyOverdue),
     notifyDraftStale: parseBoolean(source.notifyDraftStale, DEFAULT_NOTIFICATION_CONFIG.notifyDraftStale),
     notifyStatusChanges: parseBoolean(source.notifyStatusChanges, DEFAULT_NOTIFICATION_CONFIG.notifyStatusChanges),
+    notifyUsageLimits: parseBoolean(source.notifyUsageLimits, DEFAULT_NOTIFICATION_CONFIG.notifyUsageLimits),
     notifyEmailFailures: parseBoolean(source.notifyEmailFailures, DEFAULT_NOTIFICATION_CONFIG.notifyEmailFailures),
     notifyExportFailures: parseBoolean(source.notifyExportFailures, DEFAULT_NOTIFICATION_CONFIG.notifyExportFailures),
     dueSoonDays: parseIntRange(source.dueSoonDays, DEFAULT_NOTIFICATION_CONFIG.dueSoonDays, 0, 30),

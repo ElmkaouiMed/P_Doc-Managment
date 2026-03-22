@@ -76,6 +76,31 @@ export type DashboardPaymentItem = {
   amountLabel: string;
 };
 
+export type DashboardFunnelStep = {
+  key: string;
+  label: string;
+  count: number;
+  rateFromPrevious: number | null;
+  rateFromStart: number | null;
+};
+
+export type DashboardFunnelDropOff = {
+  key: string;
+  fromLabel: string;
+  toLabel: string;
+  fromCount: number;
+  toCount: number;
+  conversionRate: number | null;
+  dropOffRate: number | null;
+};
+
+export type DashboardFunnelLeadTime = {
+  samples: number;
+  avgHours: number | null;
+  medianHours: number | null;
+  p90Hours: number | null;
+};
+
 type DashboardViewProps = {
   currency: string;
   kpis: DashboardKpi[];
@@ -85,6 +110,13 @@ type DashboardViewProps = {
   dueInvoices: DashboardDueItem[];
   topClients: DashboardTopClientItem[];
   latestPayments: DashboardPaymentItem[];
+  funnelSteps?: DashboardFunnelStep[];
+  funnelWindowLabel?: string;
+  funnelTotalEvents?: number;
+  funnelLeadTime?: DashboardFunnelLeadTime;
+  funnelDayDropOff?: DashboardFunnelDropOff[];
+  funnelWeekDropOff?: DashboardFunnelDropOff[];
+  showFunnel?: boolean;
 };
 
 const PIE_COLORS = [
@@ -101,11 +133,46 @@ const CHART_COLORS = {
   payments: "hsl(var(--chart-2))",
   documents: "hsl(var(--chart-6))",
 } as const;
-const CHART_HEIGHT_CLASS = "mt-4 h-[240px] sm:h-[300px] lg:h-[340px]";
+const CHART_HEIGHT_CLASS = "mt-4 text-sm h-[240px] sm:h-[280px] lg:h-[320px]";
+const CHART_MIN_HEIGHT = 240;
+const CHART_TOOLTIP_STYLE = {
+  borderRadius: 10,
+  border: "1px solid hsl(var(--border))",
+  background: "hsl(var(--card))",
+  color: "hsl(var(--foreground))",
+} as const;
 
 function formatMoney(value: number, currency: string) {
   const safe = Number.isFinite(value) ? value : 0;
   return `${safe.toFixed(2)} ${currency}`;
+}
+
+function formatCompactAmount(value: number) {
+  const safe = Number.isFinite(value) ? value : 0;
+  if (Math.abs(safe) >= 1_000_000) {
+    return `${(safe / 1_000_000).toFixed(1)}M`;
+  }
+  if (Math.abs(safe) >= 1_000) {
+    return `${(safe / 1_000).toFixed(1)}K`;
+  }
+  return safe.toFixed(0);
+}
+
+function formatPercent(value: number | null) {
+  if (value == null || !Number.isFinite(value)) {
+    return "-";
+  }
+  return `${value.toFixed(1)}%`;
+}
+
+function formatHours(value: number | null) {
+  if (value == null || !Number.isFinite(value)) {
+    return "-";
+  }
+  if (Math.abs(value) >= 48) {
+    return `${(value / 24).toFixed(1)}d`;
+  }
+  return `${value.toFixed(1)}h`;
 }
 
 export function DashboardView({
@@ -117,9 +184,18 @@ export function DashboardView({
   dueInvoices,
   topClients,
   latestPayments,
+  funnelSteps = [],
+  funnelWindowLabel = "",
+  funnelTotalEvents = 0,
+  funnelLeadTime = { samples: 0, avgHours: null, medianHours: null, p90Hours: null },
+  funnelDayDropOff = [],
+  funnelWeekDropOff = [],
+  showFunnel = false,
 }: DashboardViewProps) {
   const { t } = useI18n();
   const statusData = statusDistribution.filter((item) => item.count > 0);
+  const maxFunnelCount = funnelSteps.reduce((max, step) => Math.max(max, step.count), 0);
+  const hasFunnelData = funnelSteps.some((step) => step.count > 0);
 
   return (
     <div className="space-y-6">
@@ -137,12 +213,121 @@ export function DashboardView({
         ))}
       </section>
 
+      {showFunnel ? (
+        <section className="rounded-xl border border-border bg-card/70 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-foreground">{t("dashboard.funnel.title")}</h2>
+            <span className="rounded-md border border-border/70 bg-background/35 px-2 py-1 text-[11px] text-muted-foreground">{funnelWindowLabel}</span>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">{t("dashboard.funnel.subtitle")}</p>
+
+          {hasFunnelData ? (
+            <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {funnelSteps.map((step) => {
+                const barWidth = maxFunnelCount > 0 ? Math.max(6, (step.count / maxFunnelCount) * 100) : 0;
+                return (
+                  <article key={step.key} className="rounded-lg border border-border/70 bg-background/30 p-3 transition hover:border-primary/30 hover:bg-background/50">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-semibold text-foreground">{step.label}</p>
+                      <p className="text-xs font-semibold text-primary">{step.count}</p>
+                    </div>
+                    <div className="mt-2 h-1.5 rounded-full bg-background/60">
+                      <div className="h-full rounded-full bg-primary/60" style={{ width: `${Math.max(0, Math.min(100, barWidth))}%` }} />
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                      <p>{t("dashboard.funnel.rateFromStart")}: {formatPercent(step.rateFromStart)}</p>
+                      <p>{t("dashboard.funnel.rateFromPrevious")}: {formatPercent(step.rateFromPrevious)}</p>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="mt-3 rounded-lg border border-border/70 bg-background/20 px-3 py-6 text-center text-xs text-muted-foreground">
+              {t("dashboard.funnel.empty")}
+            </p>
+          )}
+
+          <p className="mt-3 text-xs text-muted-foreground">
+            {t("dashboard.funnel.totalEvents")}: <span className="font-semibold text-foreground">{funnelTotalEvents}</span>
+          </p>
+
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            <article className="rounded-lg border border-border/70 bg-background/25 px-3 py-2">
+              <p className="text-[11px] text-muted-foreground">{t("dashboard.funnel.leadTime.samples")}</p>
+              <p className="mt-1 text-sm font-semibold text-foreground">{funnelLeadTime.samples}</p>
+            </article>
+            <article className="rounded-lg border border-border/70 bg-background/25 px-3 py-2">
+              <p className="text-[11px] text-muted-foreground">{t("dashboard.funnel.leadTime.avg")}</p>
+              <p className="mt-1 text-sm font-semibold text-foreground">{formatHours(funnelLeadTime.avgHours)}</p>
+            </article>
+            <article className="rounded-lg border border-border/70 bg-background/25 px-3 py-2">
+              <p className="text-[11px] text-muted-foreground">{t("dashboard.funnel.leadTime.median")}</p>
+              <p className="mt-1 text-sm font-semibold text-foreground">{formatHours(funnelLeadTime.medianHours)}</p>
+            </article>
+            <article className="rounded-lg border border-border/70 bg-background/25 px-3 py-2">
+              <p className="text-[11px] text-muted-foreground">{t("dashboard.funnel.leadTime.p90")}</p>
+              <p className="mt-1 text-sm font-semibold text-foreground">{formatHours(funnelLeadTime.p90Hours)}</p>
+            </article>
+          </div>
+
+          <div className="mt-3 grid gap-2 xl:grid-cols-2">
+            <article className="rounded-lg border border-border/70 bg-background/25 p-3">
+              <p className="text-xs font-semibold text-foreground">{t("dashboard.funnel.dayDropOff.title")}</p>
+              <div className="mt-2 space-y-1.5">
+                {funnelDayDropOff.map((row) => (
+                  <div key={row.key} className="rounded-md border border-border/60 bg-background/20 px-2 py-1.5 text-[11px]">
+                    <p className="font-semibold text-foreground">
+                      {row.fromLabel}
+                      {" -> "}
+                      {row.toLabel}
+                    </p>
+                    <p className="mt-0.5 text-muted-foreground">
+                      {row.fromCount}
+                      {" -> "}
+                      {row.toCount}
+                      {" • "}
+                      {t("dashboard.funnel.dayDropOff.conv")}: {formatPercent(row.conversionRate)}
+                      {" • "}
+                      {t("dashboard.funnel.dayDropOff.drop")}: {formatPercent(row.dropOffRate)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </article>
+            <article className="rounded-lg border border-border/70 bg-background/25 p-3">
+              <p className="text-xs font-semibold text-foreground">{t("dashboard.funnel.weekDropOff.title")}</p>
+              <div className="mt-2 space-y-1.5">
+                {funnelWeekDropOff.map((row) => (
+                  <div key={row.key} className="rounded-md border border-border/60 bg-background/20 px-2 py-1.5 text-[11px]">
+                    <p className="font-semibold text-foreground">
+                      {row.fromLabel}
+                      {" -> "}
+                      {row.toLabel}
+                    </p>
+                    <p className="mt-0.5 text-muted-foreground">
+                      {row.fromCount}
+                      {" -> "}
+                      {row.toCount}
+                      {" • "}
+                      {t("dashboard.funnel.weekDropOff.conv")}: {formatPercent(row.conversionRate)}
+                      {" • "}
+                      {t("dashboard.funnel.weekDropOff.drop")}: {formatPercent(row.dropOffRate)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </article>
+          </div>
+        </section>
+      ) : null}
+
       <section className="grid gap-4 xl:grid-cols-5">
         <article className="xl:col-span-3 rounded-xl border border-border bg-card/70 p-4">
           <h2 className="text-sm font-semibold text-foreground">{t("dashboard.charts.monthlyTrend.title")}</h2>
           <p className="mt-1 text-xs text-muted-foreground">{t("dashboard.charts.monthlyTrend.subtitle")}</p>
           <div className={CHART_HEIGHT_CLASS}>
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={CHART_MIN_HEIGHT}>
               <ComposedChart data={monthlySeries} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="4 4" />
                 <XAxis dataKey="label" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -151,26 +336,24 @@ export function DashboardView({
                   tick={{ fontSize: 11 }}
                   axisLine={false}
                   tickLine={false}
-                  tickFormatter={(value) => formatMoney(Number(value), currency)}
+                  tickFormatter={(value) => `${formatCompactAmount(Number(value))} ${currency}`}
                 />
                 <YAxis yAxisId="docs" orientation="right" allowDecimals={false} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
                 <Tooltip
-                  contentStyle={{
-                    borderRadius: 10,
-                    border: "1px solid hsl(var(--border))",
-                    background: "hsl(var(--card))",
-                  }}
-                  formatter={(value: number, name: string) => {
-                    if (name === "documents") {
-                      return [String(value), t("dashboard.charts.monthlyTrend.seriesDocuments")];
+                  contentStyle={CHART_TOOLTIP_STYLE}
+                  formatter={(value, name) => {
+                    const numericValue = typeof value === "number" ? value : Number(value || 0);
+                    const seriesKey = String(name);
+                    if (seriesKey === "documents") {
+                      return [String(numericValue), t("dashboard.charts.monthlyTrend.seriesDocuments")];
                     }
-                    if (name === "payments") {
-                      return [formatMoney(Number(value), currency), t("dashboard.charts.monthlyTrend.seriesPayments")];
+                    if (seriesKey === "payments") {
+                      return [formatMoney(numericValue, currency), t("dashboard.charts.monthlyTrend.seriesPayments")];
                     }
-                    return [formatMoney(Number(value), currency), t("dashboard.charts.monthlyTrend.seriesBilled")];
+                    return [formatMoney(numericValue, currency), t("dashboard.charts.monthlyTrend.seriesBilled")];
                   }}
                 />
-                <Legend />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Bar
                   yAxisId="amount"
                   dataKey="billed"
@@ -206,7 +389,7 @@ export function DashboardView({
           <h2 className="text-sm font-semibold text-foreground">{t("dashboard.charts.statusDistribution.title")}</h2>
           <p className="mt-1 text-xs text-muted-foreground">{t("dashboard.charts.statusDistribution.subtitle")}</p>
           <div className={CHART_HEIGHT_CLASS}>
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={CHART_MIN_HEIGHT}>
               <PieChart>
                 <Pie data={statusData} dataKey="count" nameKey="label" innerRadius="52%" outerRadius="78%" paddingAngle={3}>
                   {statusData.map((entry, index) => (
@@ -214,13 +397,9 @@ export function DashboardView({
                   ))}
                 </Pie>
                 <Tooltip
-                  contentStyle={{
-                    borderRadius: 10,
-                    border: "1px solid hsl(var(--border))",
-                    background: "hsl(var(--card))",
-                  }}
+                  contentStyle={CHART_TOOLTIP_STYLE}
                 />
-                <Legend />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
               </PieChart>
             </ResponsiveContainer>
           </div>

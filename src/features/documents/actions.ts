@@ -2,17 +2,22 @@
 
 import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
-import { DocumentStatus, DocumentType, ImportType, Prisma, RelationType } from "@prisma/client";
+import { DocumentStatus, DocumentType, ImportType, RelationType } from "@/lib/db-client";
+import type { Prisma } from "@/lib/db-client";
 
 import { getCompanyWriteAccessError, requireAuthContext } from "@/features/auth/lib/session";
+import { ensureCompanyUsageWithinLimit, getCompanyUsageLimitSnapshot } from "@/features/billing/lib/usage-limits";
 import {
   notifyDocumentStatusChange,
   notifyEmailFailure,
   notifyExportFailure,
+  notifyUsageLimitThreshold,
   refreshDueDocumentNotifications,
 } from "@/features/notifications/service";
 import { generateDocumentExportAction } from "@/features/templates/actions";
+import { trackFunnelEventServer } from "@/features/analytics/lib/funnel-events-server";
 import { prisma } from "@/lib/db";
+import { getStorageRoot } from "@/lib/storage";
 
 type UpsertClientInput = {
   name: string;
@@ -155,7 +160,7 @@ export async function getDocumentFormLibrariesAction() {
   };
 }
 
-const STORAGE_ROOT = path.resolve(process.cwd(), "..", "storage");
+const STORAGE_ROOT = getStorageRoot();
 const EMAIL_CONFIG_KEY = "email-config";
 const MAX_IMPORT_FILE_SIZE = 12 * 1024 * 1024;
 
@@ -443,8 +448,68 @@ function countLinesMissingUnitPrice(lines: DraftLineInput[]) {
   }, 0);
 }
 
+const INVOICE_ONLY_STATUSES: DocumentStatus[] = [
+  DocumentStatus.PARTIALLY_PAID,
+  DocumentStatus.PAID,
+  DocumentStatus.OVERDUE,
+];
+
+type StatusTransitionMap = Record<DocumentStatus, readonly DocumentStatus[]>;
+
+const INVOICE_STATUS_TRANSITIONS: StatusTransitionMap = {
+  [DocumentStatus.DRAFT]: [DocumentStatus.ISSUED, DocumentStatus.SENT, DocumentStatus.CANCELLED],
+  [DocumentStatus.ISSUED]: [DocumentStatus.SENT, DocumentStatus.OVERDUE, DocumentStatus.PARTIALLY_PAID, DocumentStatus.PAID, DocumentStatus.CANCELLED],
+  [DocumentStatus.SENT]: [DocumentStatus.OVERDUE, DocumentStatus.PARTIALLY_PAID, DocumentStatus.PAID, DocumentStatus.CANCELLED],
+  [DocumentStatus.APPROVED]: [DocumentStatus.SENT, DocumentStatus.OVERDUE, DocumentStatus.PARTIALLY_PAID, DocumentStatus.PAID, DocumentStatus.CANCELLED],
+  [DocumentStatus.REJECTED]: [DocumentStatus.ISSUED, DocumentStatus.CANCELLED],
+  [DocumentStatus.PARTIALLY_PAID]: [DocumentStatus.OVERDUE, DocumentStatus.PAID, DocumentStatus.CANCELLED],
+  [DocumentStatus.PAID]: [],
+  [DocumentStatus.OVERDUE]: [DocumentStatus.PARTIALLY_PAID, DocumentStatus.PAID, DocumentStatus.CANCELLED],
+  [DocumentStatus.CANCELLED]: [],
+};
+
+const NON_INVOICE_STATUS_TRANSITIONS: StatusTransitionMap = {
+  [DocumentStatus.DRAFT]: [DocumentStatus.ISSUED, DocumentStatus.SENT, DocumentStatus.APPROVED, DocumentStatus.REJECTED, DocumentStatus.CANCELLED],
+  [DocumentStatus.ISSUED]: [DocumentStatus.SENT, DocumentStatus.APPROVED, DocumentStatus.REJECTED, DocumentStatus.CANCELLED],
+  [DocumentStatus.SENT]: [DocumentStatus.APPROVED, DocumentStatus.REJECTED, DocumentStatus.CANCELLED],
+  [DocumentStatus.APPROVED]: [DocumentStatus.CANCELLED],
+  [DocumentStatus.REJECTED]: [DocumentStatus.ISSUED, DocumentStatus.CANCELLED],
+  [DocumentStatus.PARTIALLY_PAID]: [DocumentStatus.ISSUED, DocumentStatus.SENT, DocumentStatus.CANCELLED],
+  [DocumentStatus.PAID]: [DocumentStatus.ISSUED, DocumentStatus.SENT, DocumentStatus.CANCELLED],
+  [DocumentStatus.OVERDUE]: [DocumentStatus.ISSUED, DocumentStatus.SENT, DocumentStatus.CANCELLED],
+  [DocumentStatus.CANCELLED]: [],
+};
+
+function isInvoiceDocumentType(documentType: DocumentType) {
+  return documentType === DocumentType.FACTURE;
+}
+
+function getStatusTransitionMap(documentType: DocumentType) {
+  return isInvoiceDocumentType(documentType) ? INVOICE_STATUS_TRANSITIONS : NON_INVOICE_STATUS_TRANSITIONS;
+}
+
+function isStatusAllowedForDocumentType(documentType: DocumentType, status: DocumentStatus) {
+  if (isInvoiceDocumentType(documentType)) {
+    return true;
+  }
+  return !INVOICE_ONLY_STATUSES.includes(status);
+}
+
+function canTransitionDocumentStatus(documentType: DocumentType, fromStatus: DocumentStatus, toStatus: DocumentStatus) {
+  if (fromStatus === toStatus) {
+    return true;
+  }
+  return getStatusTransitionMap(documentType)[fromStatus].includes(toStatus);
+}
+
+function normalizeDocumentStatusForType(documentType: DocumentType, status: DocumentStatus) {
+  if (isStatusAllowedForDocumentType(documentType, status)) {
+    return status;
+  }
+  return DocumentStatus.ISSUED;
+}
+
 const OVERDUE_ELIGIBLE_STATUSES: DocumentStatus[] = [
-  DocumentStatus.DRAFT,
   DocumentStatus.ISSUED,
   DocumentStatus.SENT,
   DocumentStatus.APPROVED,
@@ -455,12 +520,41 @@ async function syncOverdueStatuses(companyId: string) {
   await prisma.document.updateMany({
     where: {
       companyId,
+      documentType: { not: DocumentType.FACTURE },
+      status: { in: INVOICE_ONLY_STATUSES },
+    },
+    data: {
+      status: DocumentStatus.ISSUED,
+    },
+  });
+
+  await prisma.document.updateMany({
+    where: {
+      companyId,
+      documentType: DocumentType.FACTURE,
       dueDate: { lt: new Date() },
       status: { in: OVERDUE_ELIGIBLE_STATUSES },
     },
     data: {
       status: DocumentStatus.OVERDUE,
     },
+  });
+}
+
+async function notifyDocumentUsageThreshold(companyId: string, documentId: string) {
+  const snapshot = await getCompanyUsageLimitSnapshot(companyId, "documents_per_month");
+  if (snapshot.limit == null) {
+    return;
+  }
+
+  await notifyUsageLimitThreshold({
+    companyId,
+    documentId,
+    metric: "documents_per_month",
+    used: snapshot.used,
+    limit: snapshot.limit,
+    periodStart: snapshot.period.start,
+    periodEnd: snapshot.period.end,
   });
 }
 
@@ -568,12 +662,30 @@ function documentPrefix(type: DocumentType) {
   return map[type];
 }
 
-async function nextDocumentNumber(companyId: string, documentType: DocumentType) {
-  const year = new Date().getFullYear();
-  const prefix = documentPrefix(documentType);
+function sanitizeDocumentPrefix(prefix: string | null | undefined, fallbackPrefix: string) {
+  const normalized = (prefix || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^A-Z0-9_-]/g, "");
+  return normalized || fallbackPrefix;
+}
+
+function sanitizeNextSequenceValue(value: unknown, fallback = 1) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function formatDocumentNumber(prefix: string, year: number, sequence: number) {
+  return `${prefix}-${year}-${String(sequence).padStart(5, "0")}`;
+}
+
+async function estimateNextSequenceValue(companyId: string, documentType: DocumentType, year: number) {
   const yearStart = new Date(Date.UTC(year, 0, 1, 0, 0, 0));
   const yearEnd = new Date(Date.UTC(year + 1, 0, 1, 0, 0, 0));
-
   const count = await prisma.document.count({
     where: {
       companyId,
@@ -584,10 +696,62 @@ async function nextDocumentNumber(companyId: string, documentType: DocumentType)
       },
     },
   });
+  return count + 1;
+}
 
-  let sequence = count + 1;
-  while (sequence < count + 1000) {
-    const candidate = `${prefix}-${year}-${String(sequence).padStart(5, "0")}`;
+async function nextDocumentNumber(companyId: string, documentType: DocumentType) {
+  const year = new Date().getFullYear();
+  const fallbackPrefix = documentPrefix(documentType);
+  let rule = await prisma.numberingSequence.findUnique({
+    where: {
+      companyId_documentType: {
+        companyId,
+        documentType,
+      },
+    },
+    select: {
+      prefix: true,
+      nextValue: true,
+    },
+  });
+
+  if (!rule) {
+    const initialNextValue = await estimateNextSequenceValue(companyId, documentType, year);
+    try {
+      rule = await prisma.numberingSequence.create({
+        data: {
+          companyId,
+          documentType,
+          prefix: fallbackPrefix,
+          nextValue: initialNextValue,
+          currentYear: year,
+        },
+        select: {
+          prefix: true,
+          nextValue: true,
+        },
+      });
+    } catch {
+      rule = await prisma.numberingSequence.findUnique({
+        where: {
+          companyId_documentType: {
+            companyId,
+            documentType,
+          },
+        },
+        select: {
+          prefix: true,
+          nextValue: true,
+        },
+      });
+    }
+  }
+
+  const prefix = sanitizeDocumentPrefix(rule?.prefix, fallbackPrefix);
+  let sequence = sanitizeNextSequenceValue(rule?.nextValue, 1);
+
+  for (let attempt = 0; attempt < 2000; attempt += 1) {
+    const candidate = formatDocumentNumber(prefix, year, sequence);
     const exists = await prisma.document.findFirst({
       where: {
         companyId,
@@ -597,12 +761,53 @@ async function nextDocumentNumber(companyId: string, documentType: DocumentType)
       select: { id: true },
     });
     if (!exists) {
+      await prisma.numberingSequence.upsert({
+        where: {
+          companyId_documentType: {
+            companyId,
+            documentType,
+          },
+        },
+        create: {
+          companyId,
+          documentType,
+          prefix,
+          nextValue: sequence + 1,
+          currentYear: year,
+        },
+        update: {
+          prefix,
+          nextValue: sequence + 1,
+          currentYear: year,
+        },
+      });
       return candidate;
     }
     sequence += 1;
   }
 
-  return `${prefix}-${year}-${Date.now()}`;
+  const fallbackNumber = `${prefix}-${year}-${Date.now()}`;
+  await prisma.numberingSequence.upsert({
+    where: {
+      companyId_documentType: {
+        companyId,
+        documentType,
+      },
+    },
+    create: {
+      companyId,
+      documentType,
+      prefix,
+      nextValue: sequence + 1,
+      currentYear: year,
+    },
+    update: {
+      prefix,
+      nextValue: sequence + 1,
+      currentYear: year,
+    },
+  });
+  return fallbackNumber;
 }
 
 async function resolveClientId(companyId: string, client: CreateDocumentFromDraftInput["client"]) {
@@ -918,6 +1123,13 @@ export async function createDocumentFromDraftAction(input: CreateDocumentFromDra
   if (writeAccessError) {
     return { ok: false as const, error: writeAccessError };
   }
+  const limitCheck = await ensureCompanyUsageWithinLimit({
+    companyId: auth.company.id,
+    key: "documents_per_month",
+  });
+  if (!limitCheck.ok) {
+    return { ok: false as const, error: limitCheck.error || "Monthly document limit reached." };
+  }
   const companyId = auth.company.id;
   const clientName = input.client.name.trim();
   if (!clientName) {
@@ -983,6 +1195,30 @@ export async function createDocumentFromDraftAction(input: CreateDocumentFromDra
 
     return createdDocument;
   });
+
+  await notifyDocumentUsageThreshold(companyId, created.id).catch(() => undefined);
+
+  const hasPreviousDocument = await prisma.document.findFirst({
+    where: {
+      companyId,
+      id: { not: created.id },
+    },
+    select: { id: true },
+  });
+
+  if (!hasPreviousDocument) {
+    await trackFunnelEventServer({
+      eventName: "first_document_created",
+      sourcePath: "/documents",
+      sourceSection: "create-document",
+      companyId,
+      userId: auth.user.id,
+      metadata: {
+        documentId: created.id,
+        documentType: created.documentType,
+      },
+    });
+  }
 
   return {
     ok: true as const,
@@ -1369,6 +1605,7 @@ export async function updateDocumentFromDraftAction(input: UpdateDocumentFromDra
   const tvaRate = clampPercent(input.totals.tvaRate, 20);
   const clientId = await resolveClientId(companyId, input.client);
   const previousMetadata = parseJsonObject(existingDocument.metadataJson) || {};
+  const normalizedStatus = normalizeDocumentStatusForType(input.documentType, existingDocument.status);
   const { issueDate, dueDate } = resolveDocumentDates({
     documentType: input.documentType,
     issueDate: input.issueDate,
@@ -1381,6 +1618,7 @@ export async function updateDocumentFromDraftAction(input: UpdateDocumentFromDra
       data: {
         clientId,
         documentType: input.documentType,
+        status: normalizedStatus,
         issueDate,
         dueDate,
         subtotalHT: input.totals.subtotalHT,
@@ -1418,6 +1656,19 @@ export async function updateDocumentFromDraftAction(input: UpdateDocumentFromDra
       lines: input.lines,
     });
 
+    if (existingDocument.status !== normalizedStatus) {
+      await tx.documentStatusEvent.create({
+        data: {
+          companyId,
+          documentId: existingDocument.id,
+          actorId: auth.user.id,
+          fromStatus: existingDocument.status,
+          toStatus: normalizedStatus,
+          note: "Status normalized after document type update.",
+        },
+      });
+    }
+
     return updatedDocument;
   });
 
@@ -1448,6 +1699,28 @@ export async function updateDocumentStatusAction(input: UpdateDocumentStatusInpu
   }
   if (!Object.values(DocumentStatus).includes(input.status)) {
     return { ok: false as const, error: "Invalid document status." };
+  }
+  const existingDocument = await prisma.document.findFirst({
+    where: {
+      id: documentId,
+      companyId: auth.company.id,
+    },
+    select: {
+      documentType: true,
+      status: true,
+    },
+  });
+  if (!existingDocument) {
+    return { ok: false as const, error: "Document not found." };
+  }
+  if (!isStatusAllowedForDocumentType(existingDocument.documentType, input.status)) {
+    return { ok: false as const, error: "This status is not allowed for this document type." };
+  }
+  if (!canTransitionDocumentStatus(existingDocument.documentType, existingDocument.status, input.status)) {
+    return {
+      ok: false as const,
+      error: `Transition from ${existingDocument.status} to ${input.status} is not allowed for this document type.`,
+    };
   }
 
   const updated = await applyDocumentStatusTransition({
@@ -1508,6 +1781,8 @@ export async function sendDocumentEmailAction(input: SendDocumentEmailInput) {
     select: {
       id: true,
       documentNumber: true,
+      documentType: true,
+      status: true,
       metadataJson: true,
       client: {
         select: {
@@ -1614,13 +1889,18 @@ export async function sendDocumentEmailAction(input: SendDocumentEmailInput) {
     return { ok: false as const, error: `Unable to send email. ${message}` };
   }
 
-  const updated = await applyDocumentStatusTransition({
-    companyId: auth.company.id,
-    actorId: auth.user.id,
-    documentId,
-    toStatus: DocumentStatus.SENT,
-    note: "Status set automatically after successful email send.",
-  });
+  const canAutoSetSent =
+    isStatusAllowedForDocumentType(document.documentType, DocumentStatus.SENT) &&
+    canTransitionDocumentStatus(document.documentType, document.status, DocumentStatus.SENT);
+  const updated = canAutoSetSent
+    ? await applyDocumentStatusTransition({
+        companyId: auth.company.id,
+        actorId: auth.user.id,
+        documentId,
+        toStatus: DocumentStatus.SENT,
+        note: "Status set automatically after successful email send.",
+      })
+    : null;
 
   if (updated?.changed) {
     await notifyDocumentStatusChange({
@@ -1636,7 +1916,7 @@ export async function sendDocumentEmailAction(input: SendDocumentEmailInput) {
     ok: true as const,
     document: {
       id: document.id,
-      status: updated?.status || DocumentStatus.SENT,
+      status: updated?.status || document.status,
     },
     recipient,
   };
@@ -1696,6 +1976,17 @@ export async function queueExcelImportAction(formData: FormData) {
   const writeAccessError = getCompanyWriteAccessError(auth);
   if (writeAccessError) {
     return { ok: false as const, errorCode: "ACCOUNT_READ_ONLY", error: writeAccessError };
+  }
+  const limitCheck = await ensureCompanyUsageWithinLimit({
+    companyId: auth.company.id,
+    key: "documents_per_month",
+  });
+  if (!limitCheck.ok) {
+    return {
+      ok: false as const,
+      errorCode: "DOCUMENT_LIMIT_REACHED",
+      error: limitCheck.error || "Monthly document limit reached.",
+    };
   }
   const file = formData.get("file");
   if (!(file instanceof File)) {
@@ -1844,6 +2135,8 @@ export async function queueExcelImportAction(formData: FormData) {
       return createdDocument;
     });
 
+    await notifyDocumentUsageThreshold(auth.company.id, created.id).catch(() => undefined);
+
     return {
       ok: true as const,
       job: {
@@ -1891,6 +2184,13 @@ export async function convertDocumentAction(input: ConvertDocumentInput) {
   const writeAccessError = getCompanyWriteAccessError(auth);
   if (writeAccessError) {
     return { ok: false as const, error: writeAccessError };
+  }
+  const limitCheck = await ensureCompanyUsageWithinLimit({
+    companyId: auth.company.id,
+    key: "documents_per_month",
+  });
+  if (!limitCheck.ok) {
+    return { ok: false as const, error: limitCheck.error || "Monthly document limit reached." };
   }
   const documentId = input.documentId.trim();
   if (!documentId) {
@@ -2029,23 +2329,26 @@ export async function convertDocumentAction(input: ConvertDocumentInput) {
 
     if (source.lineItems.length > 0) {
       await tx.documentLineItem.createMany({
-        data: source.lineItems.map((line) => ({
-          companyId: auth.company.id,
-          documentId: target.id,
-          productId: line.productId,
-          sortOrder: line.sortOrder,
-          label: line.label,
-          description: line.description,
-          sku: line.sku,
-          unit: line.unit,
-          quantity: line.quantity,
-          unitPriceHT: line.unitPriceHT,
-          discountRate: line.discountRate,
-          vatRate: line.vatRate,
-          lineSubtotalHT: line.lineSubtotalHT,
-          lineTotalTTC: line.lineTotalTTC,
-          snapshotJson: line.snapshotJson,
-        })),
+        data: source.lineItems.map(
+          (line) =>
+            ({
+              companyId: auth.company.id,
+              documentId: target.id,
+              productId: line.productId,
+              sortOrder: line.sortOrder,
+              label: line.label,
+              description: line.description,
+              sku: line.sku,
+              unit: line.unit,
+              quantity: line.quantity,
+              unitPriceHT: line.unitPriceHT,
+              discountRate: line.discountRate,
+              vatRate: line.vatRate,
+              lineSubtotalHT: line.lineSubtotalHT,
+              lineTotalTTC: line.lineTotalTTC,
+              snapshotJson: line.snapshotJson as Prisma.InputJsonValue,
+            }) satisfies Prisma.DocumentLineItemCreateManyInput,
+        ),
       });
     }
 
@@ -2071,6 +2374,8 @@ export async function convertDocumentAction(input: ConvertDocumentInput) {
 
     return target;
   });
+
+  await notifyDocumentUsageThreshold(auth.company.id, created.id).catch(() => undefined);
 
   return {
     ok: true as const,

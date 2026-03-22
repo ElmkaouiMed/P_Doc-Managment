@@ -4,8 +4,9 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { getAuthContext } from "@/features/auth/lib/session";
 import { prisma } from "@/lib/db";
+import { getStorageRoot } from "@/lib/storage";
 
-const STORAGE_ROOT = path.resolve(process.cwd(), "..", "storage");
+const STORAGE_ROOT = getStorageRoot();
 const OUTPUT_ROOT = path.resolve(STORAGE_ROOT, "document-outputs");
 
 function detectMimeType(fileName: string) {

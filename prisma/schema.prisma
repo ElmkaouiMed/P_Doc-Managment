@@ -127,29 +127,83 @@ enum NotificationStatus {
   CANCELLED
 }
 
+enum PlatformRole {
+  SUPER_ADMIN
+  FINANCE_ADMIN
+  SUPPORT_AGENT
+  VIEWER
+}
+
+enum PlatformAuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE
+  REJECT
+  LOGIN
+  LOGOUT
+  MFA_VERIFIED
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELED
+}
+
+enum BillingCycle {
+  MONTHLY
+  YEARLY
+}
+
+enum ReclamationStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+enum ReclamationPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum ReclamationActorType {
+  CUSTOMER
+  PLATFORM
+  SYSTEM
+}
+
 model User {
-  id              String                @id @default(cuid())
-  email           String                @unique
-  passwordHash    String
-  fullName        String
-  createdAt       DateTime              @default(now())
-  updatedAt       DateTime              @updatedAt
-  memberships     CompanyMembership[]
-  createdDocs     Document[]            @relation("DocumentCreatedBy")
-  paymentsCreated Payment[]             @relation("PaymentCreatedBy")
-  eventsCreated   DocumentStatusEvent[] @relation("StatusEventCreatedBy")
-  notificationReads NotificationRead[]
-  submittedPaymentProofs PaymentProof[] @relation("PaymentProofSubmittedBy")
-  reviewedPaymentProofs  PaymentProof[] @relation("PaymentProofReviewedBy")
+  id                     String                      @id @default(cuid())
+  email                  String                      @unique
+  passwordHash           String
+  fullName               String
+  createdAt              DateTime                    @default(now())
+  updatedAt              DateTime                    @updatedAt
+  memberships            CompanyMembership[]
+  createdDocs            Document[]                  @relation("DocumentCreatedBy")
+  paymentsCreated        Payment[]                   @relation("PaymentCreatedBy")
+  eventsCreated          DocumentStatusEvent[]       @relation("StatusEventCreatedBy")
+  notificationReads      NotificationRead[]
+  submittedPaymentProofs PaymentProof[]              @relation("PaymentProofSubmittedBy")
+  reviewedPaymentProofs  PaymentProof[]              @relation("PaymentProofReviewedBy")
   companyStatusEvents    CompanyAccountStatusEvent[] @relation("CompanyStatusEventActor")
+  reclamationsCreated    Reclamation[]               @relation("ReclamationCreatedByUser")
+  reclamationMessages    ReclamationMessage[]        @relation("ReclamationMessageAuthorUser")
 }
 
 model Company {
-  id                   String                @id @default(cuid())
+  id                   String                      @id @default(cuid())
   name                 String
-  slug                 String                @unique
-  defaultCurrency      String                @default("MAD")
-  accountStatus        CompanyAccountStatus  @default(ACTIVE_PAID)
+  slug                 String                      @unique
+  defaultCurrency      String                      @default("MAD")
+  accountStatus        CompanyAccountStatus        @default(ACTIVE_PAID)
   trialStartedAt       DateTime?
   trialEndsAt          DateTime?
   graceEndsAt          DateTime?
@@ -158,8 +212,8 @@ model Company {
   lockedAt             DateTime?
   lockReason           String?
   statusNote           String?
-  createdAt            DateTime              @default(now())
-  updatedAt            DateTime              @updatedAt
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
   memberships          CompanyMembership[]
   profile              CompanyProfile?
   numberingRules       NumberingSequence[]
@@ -183,6 +237,9 @@ model Company {
   importResults        ImportJobResult[]
   paymentProofs        PaymentProof[]
   accountStatusEvents  CompanyAccountStatusEvent[]
+  subscriptions        CompanySubscription[]
+  reclamations         Reclamation[]
+  PlatformAuditLog     PlatformAuditLog[]
 }
 
 model CompanyMembership {
@@ -568,16 +625,16 @@ model PaymentProof {
 }
 
 model CompanyAccountStatusEvent {
-  id         String               @id @default(cuid())
-  companyId  String
-  actorId    String?
-  fromStatus CompanyAccountStatus?
-  toStatus   CompanyAccountStatus
-  reason     String?
+  id           String                @id @default(cuid())
+  companyId    String
+  actorId      String?
+  fromStatus   CompanyAccountStatus?
+  toStatus     CompanyAccountStatus
+  reason       String?
   metadataJson Json?
-  createdAt  DateTime             @default(now())
-  company    Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  actor      User?                @relation("CompanyStatusEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  createdAt    DateTime              @default(now())
+  company      Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  actor        User?                 @relation("CompanyStatusEventActor", fields: [actorId], references: [id], onDelete: SetNull)
 
   @@index([companyId, createdAt])
   @@index([companyId, toStatus, createdAt])
@@ -621,9 +678,9 @@ model NotificationEvent {
   document         Document            @relation(fields: [documentId], references: [id], onDelete: Cascade)
   reads            NotificationRead[]
 
+  @@unique([companyId, eventKey])
   @@index([companyId, status, createdAt])
   @@index([companyId, documentId])
-  @@unique([companyId, eventKey])
 }
 
 model NotificationRead {
@@ -648,4 +705,178 @@ model CompanySetting {
   company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   @@unique([companyId, key])
+}
+
+model PlatformUser {
+  id                  String               @id @default(cuid())
+  email               String               @unique
+  passwordHash        String
+  fullName            String
+  role                PlatformRole
+  isActive            Boolean              @default(true)
+  lastLoginAt         DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  sessions            PlatformSession[]
+  mfaSecrets          PlatformMfaSecret[]
+  auditLogs           PlatformAuditLog[]   @relation("PlatformAuditActor")
+  assignedReclaims    Reclamation[]        @relation("ReclamationAssignedPlatformUser")
+  reclamationMessages ReclamationMessage[] @relation("ReclamationMessageAuthorPlatformUser")
+}
+
+model PlatformSession {
+  id           String       @id @default(cuid())
+  userId       String
+  tokenHash    String       @unique
+  expiresAt    DateTime
+  lastUsedAt   DateTime?
+  ipAddress    String?
+  userAgent    String?
+  revokedAt    DateTime?
+  revokeReason String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  user         PlatformUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([revokedAt])
+}
+
+model PlatformMfaSecret {
+  id              String       @id @default(cuid())
+  userId          String
+  secretEncrypted String
+  backupCodesHash Json?
+  isPrimary       Boolean      @default(false)
+  verifiedAt      DateTime?
+  lastUsedAt      DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  user            PlatformUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isPrimary])
+}
+
+model PlatformAuditLog {
+  id           String              @id @default(cuid())
+  actorId      String?
+  action       PlatformAuditAction
+  entityType   String
+  entityId     String?
+  companyId    String?
+  metadataJson Json?
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime            @default(now())
+  actor        PlatformUser?       @relation("PlatformAuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  company      Company?            @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@index([actorId, createdAt])
+  @@index([companyId, createdAt])
+  @@index([entityType, entityId])
+}
+
+model PlanDefinition {
+  id            String                @id @default(cuid())
+  code          String                @unique
+  name          String
+  description   String?
+  monthlyPrice  Decimal               @default(0) @db.Decimal(14, 2)
+  yearlyPrice   Decimal               @default(0) @db.Decimal(14, 2)
+  currency      String                @default("MAD")
+  isActive      Boolean               @default(true)
+  metadataJson  Json?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+  limits        PlanLimit[]
+  subscriptions CompanySubscription[]
+
+  @@index([isActive])
+}
+
+model PlanLimit {
+  id           String         @id @default(cuid())
+  planId       String
+  key          String
+  valueInt     Int?
+  valueDecimal Decimal?       @db.Decimal(14, 4)
+  valueText    String?
+  isUnlimited  Boolean        @default(false)
+  metadataJson Json?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  plan         PlanDefinition @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@unique([planId, key])
+  @@index([key])
+}
+
+model CompanySubscription {
+  id                 String             @id @default(cuid())
+  companyId          String
+  planId             String
+  status             SubscriptionStatus @default(TRIAL)
+  billingCycle       BillingCycle       @default(MONTHLY)
+  priceAmount        Decimal            @default(0) @db.Decimal(14, 2)
+  currency           String             @default("MAD")
+  startedAt          DateTime           @default(now())
+  trialEndsAt        DateTime?
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  canceledAt         DateTime?
+  metadataJson       Json?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  company            Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  plan               PlanDefinition     @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, status])
+  @@index([planId, status])
+  @@index([currentPeriodEnd])
+}
+
+model Reclamation {
+  id              String               @id @default(cuid())
+  companyId       String
+  createdByUserId String?
+  assignedToId    String?
+  status          ReclamationStatus    @default(OPEN)
+  priority        ReclamationPriority  @default(MEDIUM)
+  category        String?
+  subject         String
+  description     String?
+  channel         String?
+  slaDeadlineAt   DateTime?
+  firstResponseAt DateTime?
+  resolvedAt      DateTime?
+  closedAt        DateTime?
+  metadataJson    Json?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  company         Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdByUser   User?                @relation("ReclamationCreatedByUser", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  assignedTo      PlatformUser?        @relation("ReclamationAssignedPlatformUser", fields: [assignedToId], references: [id], onDelete: SetNull)
+  messages        ReclamationMessage[]
+
+  @@index([companyId, status, priority, createdAt])
+  @@index([assignedToId, status, updatedAt])
+}
+
+model ReclamationMessage {
+  id                   String               @id @default(cuid())
+  reclamationId        String
+  authorType           ReclamationActorType
+  authorUserId         String?
+  authorPlatformUserId String?
+  body                 String
+  attachmentsJson      Json?
+  isInternalNote       Boolean              @default(false)
+  createdAt            DateTime             @default(now())
+  reclamation          Reclamation          @relation(fields: [reclamationId], references: [id], onDelete: Cascade)
+  authorUser           User?                @relation("ReclamationMessageAuthorUser", fields: [authorUserId], references: [id], onDelete: SetNull)
+  authorPlatformUser   PlatformUser?        @relation("ReclamationMessageAuthorPlatformUser", fields: [authorPlatformUserId], references: [id], onDelete: SetNull)
+
+  @@index([reclamationId, createdAt])
+  @@index([authorUserId, createdAt])
+  @@index([authorPlatformUserId, createdAt])
 }

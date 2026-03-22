@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { PageEducationBanner } from "@/components/marketing/page-education-banner";
 import { requireAuthContext } from "@/features/auth/lib/session";
 import { ProductsView } from "@/features/products/components/products-view";
 import { getServerI18n } from "@/i18n/server";
@@ -103,6 +104,23 @@ export default async function ProductsPage() {
           {t("products.page.subtitle")}
         </p>
       </header>
+      <PageEducationBanner
+        title={t("education.banner.products.title")}
+        description={t("education.banner.products.description")}
+        videoLabel={t("education.banner.common.watchVideo")}
+        videoHref="https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+        helpLabel={t("education.banner.common.needHelp")}
+        supportTitle={t("education.banner.support.title")}
+        supportDescription={t("education.banner.support.description")}
+        supportCallLabel={t("education.banner.support.call")}
+        supportCloseLabel={t("education.banner.support.close")}
+        sourceSection="education-products"
+        checklist={[
+          t("education.banner.products.point1"),
+          t("education.banner.products.point2"),
+          t("education.banner.products.point3"),
+        ]}
+      />
       <ProductsView products={rows} currency={currency} />
     </div>
   );

@@ -1,17 +1,17 @@
 category,item,cost_type,currency,monthly_cost,notes
-Infrastructure,VPS/Hosting,Fixed,MAD,,
-Infrastructure,Domain,Fixed,MAD,,
-Infrastructure,Backups/Storage,Fixed,MAD,,
-Infrastructure,Monitoring/Logging,Fixed,MAD,,
-Infrastructure,Email Service Base,Fixed,MAD,,
-Operations,Support Baseline,Fixed,MAD,,
-Operations,Admin/Tools Subscriptions,Fixed,MAD,,
-Variable,Storage Per Active Account,VariablePerAccount,MAD,,
-Variable,Email/Notifications Per Active Account,VariablePerAccount,MAD,,
-Variable,Document Processing Per Active Account,VariablePerAccount,MAD,,
-Variable,Support Handling Per Active Account,VariablePerAccount,MAD,,
-Forecast,Expected Paid Users (Month 1),ForecastCount,Count,,
-Forecast,Expected Paid Users (Month 2),ForecastCount,Count,,
-Forecast,Expected Paid Users (Month 3),ForecastCount,Count,,
-Pricing,Target Gross Margin,Assumption,Percent,0.8,
-Pricing,Yearly Discount,Assumption,Percent,0.2,
+Infrastructure,VPS/Hosting,Fixed,MAD,480,Primary app + owner app hosting
+Infrastructure,Domain,Fixed,MAD,20,Main domain + subdomain setup
+Infrastructure,Backups/Storage,Fixed,MAD,140,Automated backups and object storage base tier
+Infrastructure,Monitoring/Logging,Fixed,MAD,120,Uptime + log observability tools
+Infrastructure,Email Service Base,Fixed,MAD,160,Provider base package
+Operations,Support Baseline,Fixed,MAD,2800,Initial onboarding and support ops
+Operations,Admin/Tools Subscriptions,Fixed,MAD,360,Project tooling and productivity stack
+Variable,Storage Per Active Account,VariablePerAccount,MAD,4,Average monthly incremental storage
+Variable,Email/Notifications Per Active Account,VariablePerAccount,MAD,3,Transactional notifications and alerts
+Variable,Document Processing Per Active Account,VariablePerAccount,MAD,5,Export/processing overhead
+Variable,Support Handling Per Active Account,VariablePerAccount,MAD,14,Support effort allocation
+Forecast,Expected Paid Users (Month 1),ForecastCount,Count,120,Launch baseline
+Forecast,Expected Paid Users (Month 2),ForecastCount,Count,180,Pipeline conversion target
+Forecast,Expected Paid Users (Month 3),ForecastCount,Count,240,Quarter stabilization target
+Pricing,Target Gross Margin,Assumption,Percent,0.8,Target margin for sustainable growth
+Pricing,Yearly Discount,Assumption,Percent,0.2,20% yearly incentive

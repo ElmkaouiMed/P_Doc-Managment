@@ -362,7 +362,17 @@ export function ProductsView({ products, currency }: ProductsViewProps) {
 
   return (
     <div className="space-y-4">
-      <div className="relative z-40 space-y-3 rounded-md border border-border bg-card/70 p-4">
+      
+
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+        <StatCard label={t("products.summary.totalProducts")} value={String(stats.total)} />
+        <StatCard label={t("products.summary.catalogHtSum")} amount={stats.catalogHT} currency={currency} metaTone="positive" />
+        <StatCard label={t("products.summary.usedInDocuments")} value={String(stats.usedInDocs)} />
+        <StatCard label={t("products.summary.soldQuantity")} value={stats.soldQuantity.toFixed(3)} />
+        <StatCard label={t("products.summary.revenueHt")} amount={stats.revenueHT} currency={currency} metaTone="positive" />
+      </div>
+      
+      <div className="relative space-y-3 rounded-md border border-border bg-card/70 p-4">
         <div className="grid gap-3 md:grid-cols-[1fr_220px_220px_auto]">
           <FilterField
             value={query}
@@ -412,15 +422,6 @@ export function ProductsView({ products, currency }: ProductsViewProps) {
           </div>
         </div>
       </div>
-
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <StatCard label={t("products.summary.totalProducts")} value={String(stats.total)} />
-        <StatCard label={t("products.summary.catalogHtSum")} amount={stats.catalogHT} currency={currency} metaTone="positive" />
-        <StatCard label={t("products.summary.usedInDocuments")} value={String(stats.usedInDocs)} />
-        <StatCard label={t("products.summary.soldQuantity")} value={stats.soldQuantity.toFixed(3)} />
-        <StatCard label={t("products.summary.revenueHt")} amount={stats.revenueHT} currency={currency} metaTone="positive" />
-      </div>
-
       <div className="rounded-md border border-border bg-card/70 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">

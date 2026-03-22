@@ -1,7 +1,8 @@
-import { CompanyAccountStatus, Prisma } from "@prisma/client";
+import { CompanyAccountStatus } from "@/lib/db-client";
 
 import { prisma } from "@/lib/db";
 import { deriveLifecycleStatus, transitionReason } from "@/features/billing/lib/account-lifecycle";
+import { isDesktopMode } from "@/lib/runtime";
 
 type SyncLifecycleResult = {
   companyId: string;
@@ -10,6 +11,14 @@ type SyncLifecycleResult = {
 };
 
 export async function syncCompanyLifecycleStatus(companyId: string, now = new Date()): Promise<SyncLifecycleResult | null> {
+  if (isDesktopMode()) {
+    return {
+      companyId,
+      status: CompanyAccountStatus.ACTIVE_PAID,
+      updated: false,
+    };
+  }
+
   return prisma.$transaction(async (tx) => {
     const company = await tx.company.findUnique({
       where: { id: companyId },
@@ -44,7 +53,7 @@ export async function syncCompanyLifecycleStatus(companyId: string, now = new Da
       };
     }
 
-    const updateData: Prisma.CompanyUpdateInput = {
+    const updateData: any = {
       accountStatus: nextStatus,
       statusNote: transitionReason(company.accountStatus, nextStatus),
     };

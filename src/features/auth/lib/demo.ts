@@ -1,6 +1,7 @@
-import { MembershipRole } from "@prisma/client";
+import { MembershipRole } from "@/lib/db-client";
 
 import { prisma } from "@/lib/db";
+import { getDesktopAdminDefaults, isDesktopMode } from "@/lib/runtime";
 import { hashPassword } from "./password";
 
 type DemoAccountInfo = {
@@ -10,12 +11,14 @@ type DemoAccountInfo = {
   companyName: string;
 };
 
-const defaultDemo: DemoAccountInfo = {
-  email: process.env.DEMO_EMAIL ?? "demo@docv1.local",
-  password: process.env.DEMO_PASSWORD ?? "Demo1234!",
-  fullName: process.env.DEMO_FULL_NAME ?? "Demo Owner",
-  companyName: process.env.DEMO_COMPANY_NAME ?? "Demo Workspace",
-};
+const defaultDemo: DemoAccountInfo = isDesktopMode()
+  ? getDesktopAdminDefaults()
+  : {
+      email: process.env.DEMO_EMAIL ?? "demo@docv1.local",
+      password: process.env.DEMO_PASSWORD ?? "Demo1234!",
+      fullName: process.env.DEMO_FULL_NAME ?? "Demo Owner",
+      companyName: process.env.DEMO_COMPANY_NAME ?? "Demo Workspace",
+    };
 
 function toSlug(value: string) {
   const slug = value

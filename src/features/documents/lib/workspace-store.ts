@@ -29,6 +29,7 @@ export const DOCUMENT_STATUS_OPTIONS = [
 
 export type DocumentType = (typeof DOCUMENT_TYPE_OPTIONS)[number];
 export type DocumentStatus = (typeof DOCUMENT_STATUS_OPTIONS)[number];
+type ManualDocumentType = (typeof MANUAL_DOCUMENT_TYPE_OPTIONS)[number];
 
 export const DOCUMENT_TYPE_LABELS: Record<DocumentType, string> = {
   DEVIS: "Devis",
@@ -367,11 +368,14 @@ function sanitizeDocumentTypes(input: unknown): DocumentType[] {
   if (!Array.isArray(input)) {
     return [...MANUAL_DOCUMENT_TYPE_OPTIONS];
   }
-  const values = input.filter((item): item is DocumentType => MANUAL_DOCUMENT_TYPE_OPTIONS.includes(item as DocumentType));
+  const values = input.filter(
+    (item): item is ManualDocumentType =>
+      typeof item === "string" && MANUAL_DOCUMENT_TYPE_OPTIONS.includes(item as ManualDocumentType),
+  );
   if (values.length === 0) {
     return [...MANUAL_DOCUMENT_TYPE_OPTIONS];
   }
-  return [...new Set(values)];
+  return [...new Set(values)] as DocumentType[];
 }
 
 function sanitizeDocumentStatus(input: unknown): DocumentStatus {

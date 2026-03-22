@@ -1,9 +1,15 @@
 "use server";
 
-import { CompanyAccountStatus, MembershipRole, PaymentProofMethod, PaymentProofStatus, Prisma } from "@prisma/client";
+import { randomUUID } from "crypto";
+import { mkdir, unlink, writeFile } from "fs/promises";
+import path from "path";
+import { CompanyAccountStatus, MembershipRole, PaymentProofMethod, PaymentProofStatus } from "@/lib/db-client";
 
 import { requireAuthContext } from "@/features/auth/lib/session";
+import { trackFunnelEventServer } from "@/features/analytics/lib/funnel-events-server";
+import { getCompanyUsageLimitSnapshot } from "@/features/billing/lib/usage-limits";
 import { prisma } from "@/lib/db";
+import { getStorageRoot } from "@/lib/storage";
 
 type SubmitPaymentProofInput = {
   method: PaymentProofMethod;
@@ -24,6 +30,17 @@ type ReviewPaymentProofInput = {
 type ListPaymentProofsInput = {
   limit?: number;
   mineOnly?: boolean;
+};
+
+const STORAGE_ROOT = getStorageRoot();
+const PAYMENT_PROOFS_ROOT = path.resolve(STORAGE_ROOT, "payment-proofs");
+const MAX_PAYMENT_PROOF_FILE_SIZE = 8 * 1024 * 1024;
+const PAYMENT_PROOF_ALLOWED_EXTENSIONS = new Set([".pdf", ".png", ".jpg", ".jpeg", ".webp"]);
+const PAYMENT_PROOF_EXTENSION_BY_MIME: Record<string, string> = {
+  "application/pdf": ".pdf",
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/webp": ".webp",
 };
 
 function cleanText(value: string | undefined | null) {
@@ -49,6 +66,34 @@ function normalizeCurrency(value: string | undefined) {
 
 function canReviewProof(role: MembershipRole) {
   return role === MembershipRole.OWNER || role === MembershipRole.ADMIN;
+}
+
+function sanitizeFileName(fileName: string) {
+  return fileName.replace(/[^a-zA-Z0-9._-]+/g, "_");
+}
+
+function toRelativePaymentProofPath(companyId: string, fileName: string) {
+  return path.join("payment-proofs", companyId, fileName);
+}
+
+function toAbsoluteStoragePath(relativePath: string) {
+  return path.resolve(STORAGE_ROOT, relativePath);
+}
+
+function resolvePaymentProofExtension(fileName: string, mimeType: string) {
+  const fromName = path.extname(fileName).toLowerCase();
+  if (PAYMENT_PROOF_ALLOWED_EXTENSIONS.has(fromName)) {
+    return fromName;
+  }
+  const fromMime = PAYMENT_PROOF_EXTENSION_BY_MIME[(mimeType || "").toLowerCase()];
+  if (fromMime && PAYMENT_PROOF_ALLOWED_EXTENSIONS.has(fromMime)) {
+    return fromMime;
+  }
+  return null;
+}
+
+function normalizeStoragePath(value: string) {
+  return value.replace(/\\/g, "/");
 }
 
 export async function getCompanyLifecycleAction() {
@@ -83,6 +128,36 @@ export async function getCompanyLifecycleAction() {
       awaitingActivationAt: company.awaitingActivationAt?.toISOString() || null,
       activatedAt: company.activatedAt?.toISOString() || null,
       lockedAt: company.lockedAt?.toISOString() || null,
+    },
+  };
+}
+
+export async function getCompanyUsageLimitsAction() {
+  const auth = await requireAuthContext();
+  const [documents, exports] = await Promise.all([
+    getCompanyUsageLimitSnapshot(auth.company.id, "documents_per_month"),
+    getCompanyUsageLimitSnapshot(auth.company.id, "exports_per_month"),
+  ]);
+
+  return {
+    ok: true as const,
+    usage: {
+      documents: {
+        used: documents.used,
+        limit: documents.limit,
+        remaining: documents.remaining,
+        planCode: documents.planCode,
+        periodStart: documents.period.start.toISOString(),
+        periodEnd: documents.period.end.toISOString(),
+      },
+      exports: {
+        used: exports.used,
+        limit: exports.limit,
+        remaining: exports.remaining,
+        planCode: exports.planCode,
+        periodStart: exports.period.start.toISOString(),
+        periodEnd: exports.period.end.toISOString(),
+      },
     },
   };
 }
@@ -189,7 +264,7 @@ export async function submitPaymentProofAction(input: SubmitPaymentProofInput) {
         reference,
         proofFilePath,
         note,
-        metadataJson: input.metadataJson ? (input.metadataJson as Prisma.InputJsonValue) : undefined,
+        metadataJson: (input.metadataJson as any) ?? undefined,
         submittedAt: now,
       },
       select: {
@@ -236,6 +311,20 @@ export async function submitPaymentProofAction(input: SubmitPaymentProofInput) {
     return { ok: false as const, error: "Company not found." };
   }
 
+  await trackFunnelEventServer({
+    eventName: "payment_proof_submitted",
+    sourcePath: "/settings",
+    sourceSection: "payment-proof",
+    companyId: auth.company.id,
+    userId: auth.user.id,
+    metadata: {
+      paymentProofId: created.id,
+      method: created.method,
+      currency: created.currency,
+      amount: created.amount == null ? null : Number(created.amount),
+    },
+  });
+
   return {
     ok: true as const,
     proof: {
@@ -244,6 +333,88 @@ export async function submitPaymentProofAction(input: SubmitPaymentProofInput) {
       submittedAt: created.submittedAt.toISOString(),
     },
   };
+}
+
+export async function submitPaymentProofWithFileAction(formData: FormData) {
+  const methodValue = String(formData.get("method") ?? "").trim();
+  if (!methodValue) {
+    return { ok: false as const, error: "Payment method is required." };
+  }
+  if (!Object.values(PaymentProofMethod).includes(methodValue as PaymentProofMethod)) {
+    return { ok: false as const, error: "Invalid payment method." };
+  }
+
+  const amountRaw = String(formData.get("amount") ?? "").trim();
+  const parsedAmount = amountRaw.length ? Number.parseFloat(amountRaw) : null;
+  if (amountRaw.length && (!Number.isFinite(parsedAmount || NaN) || (parsedAmount || 0) <= 0)) {
+    return { ok: false as const, error: "Amount must be a positive number." };
+  }
+
+  const currency = String(formData.get("currency") ?? "");
+  const reference = String(formData.get("reference") ?? "");
+  const note = String(formData.get("note") ?? "");
+  const proofFileRaw = formData.get("proofFile");
+
+  let storedRelativePath: string | undefined;
+  let storedAbsolutePath: string | null = null;
+
+  if (proofFileRaw != null && !(proofFileRaw instanceof File)) {
+    return { ok: false as const, error: "Invalid proof file." };
+  }
+
+  if (proofFileRaw instanceof File && proofFileRaw.size > 0) {
+    if (proofFileRaw.size > MAX_PAYMENT_PROOF_FILE_SIZE) {
+      return { ok: false as const, error: "Proof file is too large (max 8 MB)." };
+    }
+
+    const safeOriginalName = sanitizeFileName(proofFileRaw.name || "payment-proof");
+    const extension = resolvePaymentProofExtension(safeOriginalName, proofFileRaw.type || "");
+    if (!extension) {
+      return { ok: false as const, error: "Unsupported proof file format. Use PDF, PNG, JPG, JPEG, or WEBP." };
+    }
+
+    const auth = await requireAuthContext();
+    const baseName = path.basename(safeOriginalName, path.extname(safeOriginalName)) || "payment-proof";
+    const finalFileName = `${Date.now()}_${randomUUID().slice(0, 8)}_${baseName}${extension}`;
+    const relativePath = toRelativePaymentProofPath(auth.company.id, finalFileName);
+    const absolutePath = toAbsoluteStoragePath(relativePath);
+
+    if (!absolutePath.startsWith(PAYMENT_PROOFS_ROOT)) {
+      return { ok: false as const, error: "Invalid proof file path." };
+    }
+
+    const buffer = Buffer.from(await proofFileRaw.arrayBuffer());
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, buffer);
+
+    storedRelativePath = normalizeStoragePath(relativePath);
+    storedAbsolutePath = absolutePath;
+  }
+
+  try {
+    const result = await submitPaymentProofAction({
+      method: methodValue as PaymentProofMethod,
+      amount: parsedAmount,
+      currency,
+      reference,
+      note,
+      proofFilePath: storedRelativePath,
+    });
+
+    if (!result.ok && storedAbsolutePath) {
+      await unlink(storedAbsolutePath).catch(() => undefined);
+    }
+
+    return result;
+  } catch (e) {
+    if (storedAbsolutePath) {
+      await unlink(storedAbsolutePath).catch(() => undefined);
+    }
+    return {
+      ok: false as const,
+      error: e instanceof Error ? e.message : "Unable to submit payment proof.",
+    };
+  }
 }
 
 export async function reviewPaymentProofAction(input: ReviewPaymentProofInput) {
@@ -310,6 +481,7 @@ export async function reviewPaymentProofAction(input: ReviewPaymentProofInput) {
       return {
         proof: updatedProof,
         companyStatus: null,
+        companyStatusChanged: false,
       };
     }
 
@@ -322,7 +494,8 @@ export async function reviewPaymentProofAction(input: ReviewPaymentProofInput) {
       targetStatus = CompanyAccountStatus.AWAITING_ACTIVATION;
     }
 
-    if (targetStatus !== company.accountStatus) {
+    const companyStatusChanged = targetStatus !== company.accountStatus;
+    if (companyStatusChanged) {
       await tx.company.update({
         where: { id: existing.companyId },
         data: {
@@ -359,11 +532,25 @@ export async function reviewPaymentProofAction(input: ReviewPaymentProofInput) {
     return {
       proof: updatedProof,
       companyStatus: targetStatus,
+      companyStatusChanged,
     };
   });
 
   if (!reviewed) {
     return { ok: false as const, error: "Payment proof not found." };
+  }
+
+  if (reviewed.companyStatusChanged && reviewed.companyStatus === CompanyAccountStatus.ACTIVE_PAID) {
+    await trackFunnelEventServer({
+      eventName: "account_activated",
+      sourcePath: "/settings",
+      sourceSection: "payment-proof-review",
+      companyId: auth.company.id,
+      userId: auth.user.id,
+      metadata: {
+        paymentProofId: reviewed.proof.id,
+      },
+    });
   }
 
   return {

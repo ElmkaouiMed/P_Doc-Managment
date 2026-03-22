@@ -140,6 +140,35 @@ const DOCUMENT_STATUS_I18N_KEYS: Record<string, string> = {
   CANCELLED: "documents.status.cancelled",
 };
 
+const INVOICE_DOCUMENT_TYPE: (typeof DOCUMENT_TYPE_OPTIONS)[number] = "FACTURE";
+const INVOICE_TRANSITIONS: Record<string, readonly string[]> = {
+  DRAFT: ["ISSUED", "SENT", "CANCELLED"],
+  ISSUED: ["SENT", "PAID", "OVERDUE", "CANCELLED"],
+  SENT: ["PAID", "OVERDUE", "CANCELLED"],
+  OVERDUE: ["PAID", "CANCELLED"],
+  PAID: [],
+  CANCELLED: [],
+};
+const NON_INVOICE_TRANSITIONS: Record<string, readonly string[]> = {
+  DRAFT: ["ISSUED", "SENT", "CANCELLED"],
+  ISSUED: ["SENT", "CANCELLED"],
+  SENT: ["CANCELLED"],
+  CANCELLED: [],
+  PAID: ["ISSUED", "SENT", "CANCELLED"],
+  OVERDUE: ["ISSUED", "SENT", "CANCELLED"],
+  PARTIALLY_PAID: ["ISSUED", "SENT", "CANCELLED"],
+};
+const STATUS_FILTER_VALUES = ["DRAFT", "ISSUED", "SENT", "PAID", "OVERDUE", "CANCELLED"] as const;
+
+function isInvoiceDocumentType(value: (typeof DOCUMENT_TYPE_OPTIONS)[number]) {
+  return value === INVOICE_DOCUMENT_TYPE;
+}
+
+function getAllowedStatusTransitions(documentType: (typeof DOCUMENT_TYPE_OPTIONS)[number], currentStatus: string) {
+  const map = isInvoiceDocumentType(documentType) ? INVOICE_TRANSITIONS : NON_INVOICE_TRANSITIONS;
+  return map[currentStatus] || [];
+}
+
 function formatMoney(value: number, currency = "MAD") {
   const safe = Number.isFinite(value) ? value : 0;
   return `${safe.toFixed(2)} ${currency}`;
@@ -278,8 +307,8 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
       const typeMatch = type === "all" || row.type === type;
       const statusMatch = status === "all" || row.status === status;
 
-      const overdueMatch = !onlyOverdue || row.status === "OVERDUE";
-      const paidMatch = !onlyPaid || row.status === "PAID";
+      const overdueMatch = !onlyOverdue || (isInvoiceDocumentType(row.type) && row.status === "OVERDUE");
+      const paidMatch = !onlyPaid || (isInvoiceDocumentType(row.type) && row.status === "PAID");
 
       return queryMatch && typeMatch && statusMatch && overdueMatch && paidMatch;
     });
@@ -290,7 +319,13 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
     [allRows, detailsDocumentId],
   );
 
-  const statusLabel = useCallback((value: string) => t(DOCUMENT_STATUS_I18N_KEYS[value] || "documents.status.draft"), [t]);
+  const statusLabel = useCallback((value: string) => {
+    const key = DOCUMENT_STATUS_I18N_KEYS[value];
+    if (key) {
+      return t(key);
+    }
+    return value.replace(/_/g, " ");
+  }, [t]);
   const documentTypeLabel = useCallback(
     (value: (typeof DOCUMENT_TYPE_OPTIONS)[number]) => t(DOCUMENT_TYPE_I18N_KEYS[value] || "documents.types.devis"),
     [t],
@@ -319,14 +354,15 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
     void saveCompanyViewPreferenceAction({ scope: "documents", mode });
   };
 
-  const statusOptions = [
-    { value: "DRAFT", label: statusLabel("DRAFT") },
-    { value: "ISSUED", label: statusLabel("ISSUED") },
-    { value: "SENT", label: statusLabel("SENT") },
-    { value: "PAID", label: statusLabel("PAID") },
-    { value: "OVERDUE", label: statusLabel("OVERDUE") },
-    { value: "CANCELLED", label: statusLabel("CANCELLED") },
-  ];
+  const statusFilterOptions = STATUS_FILTER_VALUES.map((value) => ({ value, label: statusLabel(value) }));
+  const statusOptionsForRow = useCallback(
+    (row: DocumentRow) => {
+      const nextStatuses = getAllowedStatusTransitions(row.type, row.status);
+      const values = Array.from(new Set([row.status, ...nextStatuses]));
+      return values.map((value) => ({ value, label: statusLabel(value) }));
+    },
+    [statusLabel],
+  );
 
   const actionItems = [
     { key: "details", label: t("common.details"), icon: EyeIcon },
@@ -587,7 +623,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
             id: "status",
             label: t("documents.labels.status"),
             icon: StatusIcon,
-            items: statusOptions.map((option) => ({
+            items: statusOptionsForRow(row).map((option) => ({
               id: option.value,
               label: option.label,
               active: row.status === option.value,
@@ -620,19 +656,33 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
     setDetailsLoading(false);
   };
 
-  const detailsActionRow: DocumentRow | null =
-    detailsRow ||
-    (detailsData
-      ? {
-          id: detailsData.id,
-          number: detailsData.number,
-          type: detailsData.type,
-          client: detailsData.client.name || t("documents.clientFallback"),
-          status: detailsData.status,
-          total: formatMoney(detailsData.totals.totalTTC, detailsData.currency),
-          issueDate: detailsData.issueDate,
-        }
-      : null);
+  const detailsActionRow = useMemo<DocumentRow | null>(() => {
+    if (detailsRow) {
+      return detailsRow;
+    }
+    if (!detailsData) {
+      return null;
+    }
+    return {
+      id: detailsData.id,
+      number: detailsData.number,
+      type: detailsData.type,
+      client: detailsData.client.name || t("documents.clientFallback"),
+      status: detailsData.status,
+      total: formatMoney(detailsData.totals.totalTTC, detailsData.currency),
+      issueDate: detailsData.issueDate,
+    };
+  }, [detailsData, detailsRow, t]);
+  const detailsStatusValue = detailsData?.status || detailsActionRow?.status || "";
+  const detailsStatusOptions = useMemo(() => {
+    if (!detailsActionRow) {
+      return [];
+    }
+    return statusOptionsForRow({
+      ...detailsActionRow,
+      status: detailsStatusValue || detailsActionRow.status,
+    });
+  }, [detailsActionRow, detailsStatusValue, statusOptionsForRow]);
 
   const activeViewMode: DocumentViewMode = isSmallScreen ? "grid" : viewMode;
 
@@ -662,11 +712,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
             onChange={setStatus}
             options={[
               { value: "all", label: t("documents.filters.allStatuses") },
-              { value: "DRAFT", label: statusLabel("DRAFT") },
-              { value: "ISSUED", label: statusLabel("ISSUED") },
-              { value: "SENT", label: statusLabel("SENT") },
-              { value: "PAID", label: statusLabel("PAID") },
-              { value: "OVERDUE", label: statusLabel("OVERDUE") },
+              ...statusFilterOptions,
             ]}
           />
           <div className="flex flex-wrap items-center gap-2">
@@ -966,7 +1012,7 @@ export function DocumentsTable({ initialRows }: DocumentsTableProps) {
                     type="select"
                     label={t("documents.details.changeStatus")}
                     value={detailsData?.status || detailsActionRow.status}
-                    options={statusOptions}
+                    options={detailsStatusOptions}
                     onChange={(value) => void updateRowStatus(detailsActionRow.id, value)}
                   />
                 </div>

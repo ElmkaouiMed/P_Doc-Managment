@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "@/lib/db-client";
 
 const DATABASE_CONNECTIVITY_ERROR_CODES = new Set(["P1000", "P1001", "P1002"]);
 const DATABASE_CONNECTIVITY_MESSAGE_PATTERNS = [

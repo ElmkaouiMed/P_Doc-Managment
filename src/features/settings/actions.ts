@@ -1,6 +1,7 @@
 "use server";
 
 import { prisma } from "@/lib/db";
+import { getDocumentEngineCapabilities } from "@/lib/document-engine";
 import { getCompanyWriteAccessError, requireAuthContext } from "@/features/auth/lib/session";
 import { APP_LOCALE_SETTING_KEY } from "@/i18n/constants";
 
@@ -121,6 +122,12 @@ type BusinessConfigInput = {
   autoFillArticleUnitPrice: boolean;
 };
 
+type NumberingRuleInput = {
+  documentType: ManualDocumentType;
+  prefix: string;
+  nextValue: number;
+};
+
 type EmailTemplateConfigInput = {
   enabled: boolean;
   autoSendOnCreate: boolean;
@@ -148,6 +155,14 @@ type TemplateLineColumnInput = {
 };
 
 type EmailTemplateSettingsPatchInput = Partial<Record<DocumentTypeKey, Partial<EmailTemplateConfigInput>>>;
+
+const DEFAULT_NUMBERING_PREFIX_BY_TYPE: Record<ManualDocumentType, string> = {
+  DEVIS: "DEV",
+  FACTURE: "FAC",
+  FACTURE_PROFORMA: "PRO",
+  BON_LIVRAISON: "BL",
+  BON_COMMANDE: "BC",
+};
 
 function cleanText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -186,6 +201,60 @@ function sanitizeTvaRate(input: unknown): number {
     return 100;
   }
   return Number(parsed.toFixed(2));
+}
+
+function defaultNumberingPrefix(documentType: ManualDocumentType) {
+  return DEFAULT_NUMBERING_PREFIX_BY_TYPE[documentType] || "DOC";
+}
+
+function sanitizeNumberingPrefix(input: unknown, fallbackPrefix: string): string {
+  const normalized = cleanText(typeof input === "string" ? input.toUpperCase() : "")
+    .replace(/\s+/g, "-")
+    .replace(/[^A-Z0-9_-]/g, "");
+  return normalized || fallbackPrefix;
+}
+
+function sanitizeNextReferenceValue(input: unknown, fallback = 1): number {
+  const parsed = Number.parseInt(String(input ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function normalizeNumberingRulesInput(input: unknown): NumberingRuleInput[] {
+  const source = Array.isArray(input) ? input : [];
+  const byType = new Map<ManualDocumentType, NumberingRuleInput>();
+
+  for (const row of source) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      continue;
+    }
+    const candidate = row as Record<string, unknown>;
+    const documentType = candidate.documentType;
+    if (!MANUAL_DOCUMENT_TYPES.includes(documentType as ManualDocumentType)) {
+      continue;
+    }
+    const typedDocumentType = documentType as ManualDocumentType;
+    const fallbackPrefix = defaultNumberingPrefix(typedDocumentType);
+    byType.set(typedDocumentType, {
+      documentType: typedDocumentType,
+      prefix: sanitizeNumberingPrefix(candidate.prefix, fallbackPrefix),
+      nextValue: sanitizeNextReferenceValue(candidate.nextValue, 1),
+    });
+  }
+
+  return MANUAL_DOCUMENT_TYPES.map((documentType) => {
+    const existing = byType.get(documentType);
+    if (existing) {
+      return existing;
+    }
+    return {
+      documentType,
+      prefix: defaultNumberingPrefix(documentType),
+      nextValue: 1,
+    };
+  });
 }
 
 function sanitizeBusinessConfig(raw: unknown): BusinessConfigInput {
@@ -235,6 +304,27 @@ function sanitizeExportSettings(raw: unknown): ExportSettingsInput {
     defaultFormat,
     outputFolder,
     includeAttachments: typeof source.includeAttachments === "boolean" ? source.includeAttachments : false,
+  };
+}
+
+async function applyEngineConstraintsToExportSettings(settings: ExportSettingsInput) {
+  const capabilities = await getDocumentEngineCapabilities();
+  if (capabilities.pdf.supported) {
+    return {
+      settings,
+      capabilities,
+    };
+  }
+
+  const enabledFormats = settings.enabledFormats.filter((format) => format !== "PDF");
+  const fallbackFormats: ExportFormat[] = enabledFormats.length ? enabledFormats : ["DOCX", "XLSX"];
+  return {
+    settings: {
+      ...settings,
+      enabledFormats: fallbackFormats,
+      defaultFormat: fallbackFormats.includes(settings.defaultFormat) ? settings.defaultFormat : fallbackFormats[0],
+    },
+    capabilities,
   };
 }
 
@@ -524,6 +614,76 @@ export async function saveCompanyBusinessConfigAction(input: Partial<BusinessCon
   return { ok: true as const, config: next };
 }
 
+export async function getCompanyNumberingRulesAction() {
+  const auth = await requireAuthContext();
+  const rows = await prisma.numberingSequence.findMany({
+    where: {
+      companyId: auth.company.id,
+    },
+    select: {
+      documentType: true,
+      prefix: true,
+      nextValue: true,
+    },
+  });
+
+  const rules = normalizeNumberingRulesInput(
+    rows
+      .filter((row) => MANUAL_DOCUMENT_TYPES.includes(row.documentType as ManualDocumentType))
+      .map((row) => ({
+        documentType: row.documentType as ManualDocumentType,
+        prefix: row.prefix,
+        nextValue: row.nextValue,
+      })),
+  );
+
+  return { ok: true as const, rules };
+}
+
+export async function saveCompanyNumberingRulesAction(input: {
+  rules: Array<{
+    documentType: ManualDocumentType;
+    prefix: string;
+    nextValue: number;
+  }>;
+}) {
+  const auth = await requireAuthContext();
+  const writeAccessError = getCompanyWriteAccessError(auth);
+  if (writeAccessError) {
+    return { ok: false as const, error: writeAccessError };
+  }
+
+  const rules = normalizeNumberingRulesInput(input.rules);
+  const currentYear = new Date().getFullYear();
+
+  await prisma.$transaction(
+    rules.map((rule) =>
+      prisma.numberingSequence.upsert({
+        where: {
+          companyId_documentType: {
+            companyId: auth.company.id,
+            documentType: rule.documentType,
+          },
+        },
+        create: {
+          companyId: auth.company.id,
+          documentType: rule.documentType,
+          prefix: rule.prefix,
+          nextValue: rule.nextValue,
+          currentYear,
+        },
+        update: {
+          prefix: rule.prefix,
+          nextValue: rule.nextValue,
+          currentYear,
+        },
+      }),
+    ),
+  );
+
+  return { ok: true as const, rules };
+}
+
 export async function saveCompanyGeneralInfoAction(input: Partial<GeneralInfoInput>) {
   const auth = await requireAuthContext();
   const writeAccessError = getCompanyWriteAccessError(auth);
@@ -766,18 +926,23 @@ export async function getCompanyExportSettingsAction() {
     },
   });
 
+  const normalized = sanitizeExportSettings(row?.valueJson ?? {});
+  const constrained = await applyEngineConstraintsToExportSettings(normalized);
+
   if (!row) {
     return {
       ok: true as const,
       hasStored: false as const,
-      settings: sanitizeExportSettings({}),
+      settings: constrained.settings,
+      capabilities: constrained.capabilities,
     };
   }
 
   return {
     ok: true as const,
     hasStored: true as const,
-    settings: sanitizeExportSettings(row.valueJson),
+    settings: constrained.settings,
+    capabilities: constrained.capabilities,
   };
 }
 
@@ -803,6 +968,7 @@ export async function saveCompanyExportSettingsAction(input: Partial<ExportSetti
     ...current,
     ...input,
   });
+  const constrained = await applyEngineConstraintsToExportSettings(next);
 
   await prisma.companySetting.upsert({
     where: {
@@ -823,7 +989,8 @@ export async function saveCompanyExportSettingsAction(input: Partial<ExportSetti
 
   return {
     ok: true as const,
-    settings: next,
+    settings: constrained.settings,
+    capabilities: constrained.capabilities,
   };
 }
 

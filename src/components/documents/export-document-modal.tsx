@@ -91,14 +91,13 @@ export function ExportDocumentModal({ open, onOpenChange, document }: ExportDocu
       listTemplateAssetsAction({ documentType: document.type }),
     ])
       .then(([settingsResult, templatesResult]) => {
-        const nextSettings = settingsResult.ok
-          ? settingsResult.settings as ExportSettings
-          : {
-              enabledFormats: ["PDF", "DOCX", "XLSX"],
-              defaultFormat: "PDF" as const,
-              outputFolder: "exports",
-              includeAttachments: false,
-            };
+        const fallbackSettings: ExportSettings = {
+          enabledFormats: ["PDF", "DOCX", "XLSX"],
+          defaultFormat: "PDF",
+          outputFolder: "exports",
+          includeAttachments: false,
+        };
+        const nextSettings: ExportSettings = settingsResult.ok ? (settingsResult.settings as ExportSettings) : fallbackSettings;
         setExportSettings(nextSettings);
         const defaultFormat = nextSettings.defaultFormat as ExportFormat;
         if (!templatesResult.ok) {

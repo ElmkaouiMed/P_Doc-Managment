@@ -1,13 +1,14 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { cache } from "react";
-import { CompanyAccountStatus, MembershipRole } from "@prisma/client";
+import { CompanyAccountStatus, MembershipRole } from "@/lib/db-client";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { lifecycleAccessError, isWriteAccessAllowed } from "@/features/billing/lib/account-lifecycle";
+import { CompanyAccessAction, hasCompanyAccess, lifecycleAccessError } from "@/features/billing/lib/account-lifecycle";
 import { syncCompanyLifecycleStatus } from "@/features/billing/lib/account-lifecycle-service";
 import { prisma } from "@/lib/db";
 import { toPublicDatabaseError } from "@/lib/errors/prisma";
+import { isDesktopMode } from "@/lib/runtime";
 
 const SESSION_COOKIE_NAME = "doc_v1_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 14;
@@ -34,6 +35,8 @@ export type AuthContext = {
   };
   role: MembershipRole;
 };
+
+export type CompanyAuthorAction = "create" | "update" | "delete" | "import" | "send" | "export";
 
 function getSessionSecret() {
   return process.env.AUTH_SECRET ?? "doc-v1-local-dev-secret-change-me";
@@ -167,8 +170,10 @@ export const getAuthContext = cache(async (): Promise<AuthContext | null> => {
     return null;
   }
 
-  const lifecycle = await syncCompanyLifecycleStatus(membership.company.id);
-  const companyAccountStatus = lifecycle?.status || membership.company.accountStatus;
+  const lifecycle = isDesktopMode() ? null : await syncCompanyLifecycleStatus(membership.company.id);
+  const companyAccountStatus = isDesktopMode()
+    ? CompanyAccountStatus.ACTIVE_PAID
+    : lifecycle?.status || membership.company.accountStatus;
 
   return {
     user: {
@@ -181,19 +186,32 @@ export const getAuthContext = cache(async (): Promise<AuthContext | null> => {
       name: membership.company.name,
       slug: membership.company.slug,
       accountStatus: companyAccountStatus,
-      trialEndsAt: membership.company.trialEndsAt,
-      graceEndsAt: membership.company.graceEndsAt,
-      lockedAt: membership.company.lockedAt,
+      trialEndsAt: isDesktopMode() ? null : membership.company.trialEndsAt,
+      graceEndsAt: isDesktopMode() ? null : membership.company.graceEndsAt,
+      lockedAt: isDesktopMode() ? null : membership.company.lockedAt,
     },
     role: membership.role,
   };
 });
 
-export function getCompanyWriteAccessError(auth: Pick<AuthContext, "company">) {
-  if (isWriteAccessAllowed(auth.company.accountStatus)) {
+function resolveAccessActionForAuthorAction(action: CompanyAuthorAction): CompanyAccessAction {
+  void action;
+  return "author";
+}
+
+export function getCompanyActionAccessError(auth: Pick<AuthContext, "company">, action: CompanyAuthorAction) {
+  if (isDesktopMode()) {
     return null;
   }
-  return lifecycleAccessError(auth.company.accountStatus);
+  const accessAction = resolveAccessActionForAuthorAction(action);
+  if (hasCompanyAccess(auth.company.accountStatus, accessAction)) {
+    return null;
+  }
+  return lifecycleAccessError(auth.company.accountStatus, accessAction);
+}
+
+export function getCompanyWriteAccessError(auth: Pick<AuthContext, "company">) {
+  return getCompanyActionAccessError(auth, "update");
 }
 
 export async function requireAuthContext() {

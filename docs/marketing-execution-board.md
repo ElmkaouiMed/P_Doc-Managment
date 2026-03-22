@@ -79,7 +79,7 @@ Acceptance: standard script captures user profile, needs, and plan recommendatio
 
 ### Track C: Pricing and Plan Catalog
 
-- [ ] P0 PM-020 (S) Fill monthly cost sheet with real operating costs.
+- [x] P0 PM-020 (S) Fill monthly cost sheet with real operating costs.
 Acceptance: fixed + variable costs completed and validated.
 
 - [ ] P0 BE-020 (M) Create plan catalog configuration.
@@ -96,7 +96,7 @@ Acceptance: documented pricing output and sensitivity check for user-volume chan
 - [ ] P0 FE-030 (L) Build 8-section landing page structure.
 Acceptance: sections include Hero, How-it-works, Preview, Benefits, Pricing, Assist, FAQ, Final CTA/Footer.
 
-- [ ] P0 FE-031 (M) Add responsive layouts and mobile-first behavior.
+- [x] P0 FE-031 (M) Add responsive layouts and mobile-first behavior.
 Acceptance: no overflow issues, clear CTA visibility, high readability on small screens.
 
 - [ ] P1 FE-032 (M) Add modern motion layer.
@@ -110,7 +110,7 @@ Acceptance: complete section copy and CTA copy in three languages.
 
 ### Track E: In-App Education
 
-- [ ] P1 FE-040 (M) Add contextual help banners above key pages.
+- [x] P1 FE-040 (M) Add contextual help banners above key pages.
 Acceptance: each key page supports a help banner with short explanation and video link.
 
 - [ ] P1 CT-040 (M) Produce first batch of short tutorial videos.
@@ -121,13 +121,13 @@ Acceptance: CTA opens assist request flow and stores request context.
 
 ### Track F: Analytics and KPI Tracking
 
-- [ ] P0 BE-050 (M) Implement analytics event schema and ingestion.
+- [x] P0 BE-050 (M) Implement analytics event schema and ingestion.
 Acceptance: events stored with user/account/session/time metadata.
 
-- [ ] P0 FE-050 (M) Emit funnel events from UI.
+- [x] P0 FE-050 (M) Emit funnel events from UI.
 Acceptance: events include `landing_view`, `signup_start`, `signup_complete`, `trial_start`, `first_document_created`, `payment_proof_submitted`, `account_activated`.
 
-- [ ] P1 BI-050 (S) Build basic conversion dashboard.
+- [x] P1 BI-050 (S) Build basic conversion dashboard.
 Acceptance: view conversion rates by step and activation lead time.
 
 ## Dependency Order
@@ -147,6 +147,23 @@ Acceptance: view conversion rates by step and activation lead time.
 
 ## Immediate Next Actions
 
-- Complete PM-020 with real monthly cost values.
+- Replace temporary tutorial links with production videos.
 - Start BE-001 and BE-010 in parallel.
 - Start FE-001 and FE-010 after backend contracts are defined.
+
+## Progress Update (2026-03-17)
+
+Completed in this iteration:
+- Landing route navbar + hero visual refresh to improve modern feel and clarity.
+- Billing tab i18n refactor: labels, toasts, status badges, methods, placeholders, and history lines now translation-based.
+- Added `settings.billing.*` keys in FR/EN/AR.
+- Finalized landing copy tone and CTA wording in FR/EN/AR.
+- Added landing visuals section and quick video actions.
+- Added contextual education banners on Dashboard, Documents, Clients, Products, and Settings.
+- Completed PM-020 baseline cost sheet and published `docs/pricing-plan-v1.md`.
+- Added analytics events for education banners (`education_banner_view`, `education_video_click`, `education_help_click`).
+
+Next step order to finish:
+- Replace temporary video links with final platform tutorial videos.
+- Validate unpaid-account lifecycle guards with scenario QA.
+- Complete CT-040 with first tutorial batch.

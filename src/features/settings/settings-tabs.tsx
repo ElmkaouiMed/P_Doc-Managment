@@ -1,13 +1,21 @@
 "use client";
 
 import { CloudUploadIcon, FileExportIcon, HierarchyFilesIcon, LayoutTemplate, LegalDocument02Icon } from "@hugeicons/core-free-icons";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 import { FormField } from "@/components/ui/form-field";
 import { HugIcon } from "@/components/ui/hug-icon";
 import { useMsgBox } from "@/components/ui/msg-box";
 import { useToast } from "@/components/ui/toast";
 import { UiButton } from "@/components/ui/ui-button";
+import {
+  getCompanyLifecycleAction,
+  getCompanyUsageLimitsAction,
+  listPaymentProofsAction,
+  reviewPaymentProofAction,
+  submitPaymentProofWithFileAction,
+} from "@/features/billing/actions";
 import {
   applyEmailTemplateVariables,
   ColumnDataType,
@@ -38,6 +46,7 @@ import {
 import type { TemplateAssetRow } from "@/features/templates/types";
 import {
   getCompanyBusinessConfigAction,
+  getCompanyNumberingRulesAction,
   getCompanyDocumentUnitsAction,
   getCompanyEmailConfigAction,
   getCompanyEmailTemplatesAction,
@@ -45,6 +54,7 @@ import {
   getCompanyGeneralInfoAction,
   getCompanyTemplateColumnsAction,
   saveCompanyBusinessConfigAction,
+  saveCompanyNumberingRulesAction,
   saveCompanyDocumentUnitsAction,
   saveCompanyEmailConfigAction,
   saveCompanyEmailTemplatesAction,
@@ -54,18 +64,20 @@ import {
 } from "@/features/settings/actions";
 import { APP_LOCALE_COOKIE } from "@/i18n/constants";
 import { useI18n } from "@/i18n/provider";
+import { isDesktopBrowserMode } from "@/lib/runtime";
 import { cn } from "@/lib/utils";
 
-const tabs = [
+const settingsTabs = [
   { key: "config", labelKey: "settings.tabs.config" },
   { key: "general", labelKey: "settings.tabs.general" },
   { key: "emails", labelKey: "settings.tabs.emails" },
   { key: "templates", labelKey: "settings.tabs.templates" },
   { key: "exports", labelKey: "settings.tabs.exports" },
+  { key: "billing", labelKey: "settings.tabs.billing" },
   { key: "notifications", labelKey: "settings.tabs.notifications" },
 ] as const;
 
-type TabKey = (typeof tabs)[number]["key"];
+type TabKey = (typeof settingsTabs)[number]["key"];
 
 const SETTINGS_PANEL_CLASS = "space-y-4 rounded-md border border-border bg-card/60 p-3 sm:p-4";
 
@@ -149,6 +161,7 @@ function ResponsiveTabStrip<T extends string>({
         ) : null}
       </div>
 
+
       <div className={cn("hidden gap-2 rounded-md p-2 sm:grid", gridClassName, surfaceClassName)}>
         {items.map((item) => (
           <button
@@ -169,25 +182,36 @@ function ResponsiveTabStrip<T extends string>({
 }
 
 export function SettingsTabs() {
-  const [active, setActive] = useState<TabKey>("general");
+  const searchParams = useSearchParams();
+  const desktopMode = isDesktopBrowserMode();
+  const tabs = desktopMode ? settingsTabs.filter((tab) => tab.key !== "billing") : settingsTabs;
+  const [active, setActive] = useState<TabKey>(() => {
+    const tab = (searchParams.get("tab") || "").trim();
+    if (tabs.some((item) => item.key === tab)) {
+      return tab as TabKey;
+    }
+    return "general";
+  });
   const { t } = useI18n();
+  const activeTab = tabs.some((item) => item.key === active) ? active : (tabs[0].key as TabKey);
 
   return (
     <section className="space-y-4">
       <ResponsiveTabStrip
         items={tabs.map((tab) => ({ key: tab.key, label: t(tab.labelKey) }))}
-        value={active}
+        value={activeTab}
         onChange={setActive}
-        gridClassName="sm:grid-cols-3 lg:grid-cols-6"
+        gridClassName="sm:grid-cols-3 lg:grid-cols-7"
         surfaceClassName="border border-border bg-card/70"
       />
 
-      {active === "config" ? <ConfigTab /> : null}
-      {active === "general" ? <GeneralInfoTab /> : null}
-      {active === "emails" ? <EmailTab /> : null}
-      {active === "templates" ? <TemplatesTab /> : null}
-      {active === "exports" ? <ExportsTab /> : null}
-      {active === "notifications" ? <NotificationsTab /> : null}
+      {activeTab === "config" ? <ConfigTab /> : null}
+      {activeTab === "general" ? <GeneralInfoTab /> : null}
+      {activeTab === "emails" ? <EmailTab /> : null}
+      {activeTab === "templates" ? <TemplatesTab /> : null}
+      {activeTab === "exports" ? <ExportsTab /> : null}
+      {!desktopMode && activeTab === "billing" ? <BillingTab /> : null}
+      {activeTab === "notifications" ? <NotificationsTab /> : null}
     </section>
   );
 }
@@ -212,9 +236,64 @@ const DOCUMENT_TYPE_I18N_KEYS: Record<DocumentType, string> = {
   EXTRACT_BON_COMMANDE_PUBLIC: "documents.types.extractBonCommandePublic",
 };
 
-const CONFIGURABLE_DOCUMENT_TYPES: DocumentType[] = DOCUMENT_TYPE_OPTIONS.filter(
-  (documentType) => documentType !== "EXTRACT_DEVIS" && documentType !== "EXTRACT_BON_COMMANDE_PUBLIC",
-);
+const CONFIGURABLE_DOCUMENT_TYPES = [
+  "DEVIS",
+  "FACTURE",
+  "FACTURE_PROFORMA",
+  "BON_LIVRAISON",
+  "BON_COMMANDE",
+] as const;
+type ConfigurableDocumentType = (typeof CONFIGURABLE_DOCUMENT_TYPES)[number];
+
+type NumberingRuleFormValues = Record<
+  ConfigurableDocumentType,
+  {
+    prefix: string;
+    nextValue: string;
+  }
+>;
+
+const DEFAULT_DOCUMENT_PREFIX_BY_TYPE: Record<ConfigurableDocumentType, string> = {
+  DEVIS: "DEV",
+  FACTURE: "FAC",
+  FACTURE_PROFORMA: "PRO",
+  BON_LIVRAISON: "BL",
+  BON_COMMANDE: "BC",
+};
+
+function normalizePrefixInput(value: string) {
+  return value
+    .toUpperCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^A-Z0-9_-]/g, "");
+}
+
+function createDefaultNumberingRuleValues(): NumberingRuleFormValues {
+  return {
+    DEVIS: { prefix: DEFAULT_DOCUMENT_PREFIX_BY_TYPE.DEVIS, nextValue: "1" },
+    FACTURE: { prefix: DEFAULT_DOCUMENT_PREFIX_BY_TYPE.FACTURE, nextValue: "1" },
+    FACTURE_PROFORMA: { prefix: DEFAULT_DOCUMENT_PREFIX_BY_TYPE.FACTURE_PROFORMA, nextValue: "1" },
+    BON_LIVRAISON: { prefix: DEFAULT_DOCUMENT_PREFIX_BY_TYPE.BON_LIVRAISON, nextValue: "1" },
+    BON_COMMANDE: { prefix: DEFAULT_DOCUMENT_PREFIX_BY_TYPE.BON_COMMANDE, nextValue: "1" },
+  };
+}
+
+function toNumberingRuleState(
+  rules: Array<{ documentType: ConfigurableDocumentType; prefix: string; nextValue: number }> | undefined,
+): NumberingRuleFormValues {
+  const output = createDefaultNumberingRuleValues();
+  for (const rule of rules || []) {
+    const documentType = rule.documentType;
+    if (!CONFIGURABLE_DOCUMENT_TYPES.includes(documentType)) {
+      continue;
+    }
+    output[documentType] = {
+      prefix: normalizePrefixInput(rule.prefix || "") || DEFAULT_DOCUMENT_PREFIX_BY_TYPE[documentType],
+      nextValue: String(rule.nextValue > 0 ? rule.nextValue : 1),
+    };
+  }
+  return output;
+}
 
 const TEMPLATE_VARIABLE_BASE_GROUPS = [
   {
@@ -337,21 +416,31 @@ Total TTC en lettres (FR): {{ totals.total_ttc_in_words }}`;
 function ConfigTab() {
   const { success, error } = useToast();
   const { t } = useI18n();
-  const documentTypeLabel = (documentType: DocumentType) => t(DOCUMENT_TYPE_I18N_KEYS[documentType] || "documents.types.devis");
-  const [enabledTypes, setEnabledTypes] = useState<DocumentType[]>(() => [...CONFIGURABLE_DOCUMENT_TYPES]);
+  const documentTypeLabel = (documentType: ConfigurableDocumentType) => t(DOCUMENT_TYPE_I18N_KEYS[documentType] || "documents.types.devis");
+  const [enabledTypes, setEnabledTypes] = useState<ConfigurableDocumentType[]>(() => [...CONFIGURABLE_DOCUMENT_TYPES]);
   const [defaultTvaRate, setDefaultTvaRate] = useState("20");
   const [autoFillArticleUnitPrice, setAutoFillArticleUnitPrice] = useState(true);
+  const [numberingRules, setNumberingRules] = useState<NumberingRuleFormValues>(() => createDefaultNumberingRuleValues());
 
   useEffect(() => {
     let mounted = true;
-    void getCompanyBusinessConfigAction()
-      .then((result) => {
-        if (!mounted || !result.ok) {
+    void Promise.all([getCompanyBusinessConfigAction(), getCompanyNumberingRulesAction()])
+      .then(([businessResult, numberingResult]) => {
+        if (!mounted) {
           return;
         }
-        setEnabledTypes(result.config.enabledDocumentTypes);
-        setDefaultTvaRate(String(result.config.defaultTvaRate));
-        setAutoFillArticleUnitPrice(result.config.autoFillArticleUnitPrice);
+        if (businessResult.ok) {
+          setEnabledTypes(businessResult.config.enabledDocumentTypes);
+          setDefaultTvaRate(String(businessResult.config.defaultTvaRate));
+          setAutoFillArticleUnitPrice(businessResult.config.autoFillArticleUnitPrice);
+        }
+        if (numberingResult.ok) {
+          setNumberingRules(
+            toNumberingRuleState(
+              numberingResult.rules as Array<{ documentType: ConfigurableDocumentType; prefix: string; nextValue: number }>,
+            ),
+          );
+        }
       })
       .catch(() => {
         error(t("settings.config.toasts.loadFailed"));
@@ -361,7 +450,7 @@ function ConfigTab() {
     };
   }, [error, t]);
 
-  const toggleType = (documentType: DocumentType) => {
+  const toggleType = (documentType: ConfigurableDocumentType) => {
     setEnabledTypes((current) => {
       if (current.includes(documentType)) {
         if (current.length === 1) {
@@ -374,25 +463,72 @@ function ConfigTab() {
     });
   };
 
+  const updateNumberingRule = (
+    documentType: ConfigurableDocumentType,
+    key: "prefix" | "nextValue",
+    value: string,
+  ) => {
+    setNumberingRules((current) => ({
+      ...current,
+      [documentType]: {
+        ...current[documentType],
+        [key]: key === "prefix" ? value.toUpperCase() : value,
+      },
+    }));
+  };
+
   const saveConfig = async () => {
     const parsedTva = Number.parseFloat(defaultTvaRate || "0");
     if (!Number.isFinite(parsedTva) || parsedTva < 0 || parsedTva > 100) {
       error(t("settings.config.toasts.invalidTva"), t("settings.config.toasts.invalidTvaHint"));
       return;
     }
+
+    const normalizedRules = CONFIGURABLE_DOCUMENT_TYPES.map((documentType) => {
+      const row = numberingRules[documentType];
+      const prefix = normalizePrefixInput(row.prefix || "");
+      if (!prefix) {
+        error(t("settings.config.toasts.invalidPrefix"), documentTypeLabel(documentType));
+        return null;
+      }
+      const nextValue = Number.parseInt(row.nextValue || "", 10);
+      if (!Number.isFinite(nextValue) || nextValue < 1) {
+        error(t("settings.config.toasts.invalidNextReference"), documentTypeLabel(documentType));
+        return null;
+      }
+      return {
+        documentType,
+        prefix,
+        nextValue,
+      };
+    });
+    if (normalizedRules.some((item) => item === null)) {
+      return;
+    }
+
     const nextConfig = {
       enabledDocumentTypes: enabledTypes,
       defaultTvaRate: parsedTva,
       autoFillArticleUnitPrice,
     };
-    const result = await saveCompanyBusinessConfigAction(nextConfig);
-    if (!result.ok) {
+    const [businessResult, numberingResult] = await Promise.all([
+      saveCompanyBusinessConfigAction(nextConfig),
+      saveCompanyNumberingRulesAction({
+        rules: normalizedRules as Array<{ documentType: ConfigurableDocumentType; prefix: string; nextValue: number }>,
+      }),
+    ]);
+    if (!businessResult.ok || !numberingResult.ok) {
       error(t("settings.config.toasts.saveFailed"));
       return;
     }
-    setEnabledTypes(result.config.enabledDocumentTypes);
-    setDefaultTvaRate(String(result.config.defaultTvaRate));
-    setAutoFillArticleUnitPrice(result.config.autoFillArticleUnitPrice);
+    setEnabledTypes(businessResult.config.enabledDocumentTypes);
+    setDefaultTvaRate(String(businessResult.config.defaultTvaRate));
+    setAutoFillArticleUnitPrice(businessResult.config.autoFillArticleUnitPrice);
+    setNumberingRules(
+      toNumberingRuleState(
+        numberingResult.rules as Array<{ documentType: ConfigurableDocumentType; prefix: string; nextValue: number }>,
+      ),
+    );
     emitWorkspaceEvent(STORE_EVENTS.businessConfigUpdated);
     success(t("settings.config.toasts.saved"), t("settings.config.toasts.savedHint"));
   };
@@ -404,7 +540,7 @@ function ConfigTab() {
         <p className="text-xs text-muted-foreground">
           {t("settings.config.subtitle")}
         </p>
-        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
           {CONFIGURABLE_DOCUMENT_TYPES.map((documentType) => {
             const enabled = enabledTypes.includes(documentType);
             return (
@@ -442,6 +578,33 @@ function ConfigTab() {
           onCheckedChange={setAutoFillArticleUnitPrice}
         />
         <p className="text-[11px] text-muted-foreground">{t("settings.config.autoFillArticlePriceHint")}</p>
+      </div>
+
+      <div className="space-y-2 rounded-md border border-border bg-background/20 p-3">
+        <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("settings.config.numberingTitle")}</p>
+        <p className="text-xs text-muted-foreground">{t("settings.config.numberingSubtitle")}</p>
+        <div className="space-y-2">
+          {CONFIGURABLE_DOCUMENT_TYPES.map((documentType) => (
+            <div key={documentType} className="grid gap-2 rounded-md border border-border bg-background/35 p-3 md:grid-cols-[minmax(0,1fr)_180px_180px] md:items-center">
+              <p className="text-xs font-semibold text-foreground">{documentTypeLabel(documentType)}</p>
+              <FormField
+                type="text"
+                label={t("settings.config.referencePrefix")}
+                value={numberingRules[documentType].prefix}
+                onChange={(value) => updateNumberingRule(documentType, "prefix", value)}
+                placeholder={DEFAULT_DOCUMENT_PREFIX_BY_TYPE[documentType]}
+              />
+              <FormField
+                type="number"
+                label={t("settings.config.nextReference")}
+                value={numberingRules[documentType].nextValue}
+                min={1}
+                step={1}
+                onChange={(value) => updateNumberingRule(documentType, "nextValue", value)}
+              />
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="flex flex-col items-start gap-2 rounded-md border border-border bg-background/30 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
@@ -1185,7 +1348,7 @@ function TemplatesTab() {
   };
 
   return (
-    <div className={cn(SETTINGS_PANEL_CLASS, "grid gap-3 text-xs")}>
+    <div className={cn(SETTINGS_PANEL_CLASS, "grid min-w-0 gap-3 text-xs")}>
       <p className="text-muted-foreground">
         {t("settings.templates.description")}
       </p>
@@ -1219,7 +1382,7 @@ function TemplatesTab() {
       />
 
       {innerTab === "files" ? (
-        <div className="space-y-3 rounded-md border border-border bg-background/20 p-3">
+        <div className="min-w-0 space-y-3 rounded-md border border-border bg-background/20 p-3">
           <div className="grid gap-3 md:grid-cols-2">
             <FormField
               type="text"
@@ -1252,7 +1415,7 @@ function TemplatesTab() {
               <p className="font-semibold text-foreground">{t("settings.templates.files.linesLoopHintTitle")}</p>
               <p className="mt-1">{t("settings.templates.files.linesLoopHintDescription")}</p>
               <div className="mt-3 grid gap-3 md:grid-cols-2">
-                <div className="rounded-md border border-border bg-background/60 p-2">
+                <div className="min-w-0 rounded-md border border-border bg-background/60 p-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="font-semibold text-foreground">{t("settings.templates.files.tableRowSnippetTitle")}</p>
                     <UiButton
@@ -1265,9 +1428,9 @@ function TemplatesTab() {
                       {t("settings.templates.files.copySnippet")}
                     </UiButton>
                   </div>
-                  <pre className="mt-2 overflow-x-auto text-[11px] text-foreground">{tableRowSnippet}</pre>
+                  <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words text-[11px] text-foreground">{tableRowSnippet}</pre>
                 </div>
-                <div className="rounded-md border border-border bg-background/60 p-2">
+                <div className="min-w-0 rounded-md border border-border bg-background/60 p-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="font-semibold text-foreground">{t("settings.templates.files.totalsSnippetTitle")}</p>
                     <UiButton
@@ -1280,7 +1443,7 @@ function TemplatesTab() {
                       {t("settings.templates.files.copySnippet")}
                     </UiButton>
                   </div>
-                  <pre className="mt-2 overflow-x-auto text-[11px] text-foreground">{DOCX_TOTALS_SNIPPET}</pre>
+                  <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words text-[11px] text-foreground">{DOCX_TOTALS_SNIPPET}</pre>
                 </div>
               </div>
             </div>
@@ -1304,7 +1467,7 @@ function TemplatesTab() {
                           void copyTemplateSnippet(`{{${variableName}}}`);
                         }}
                         className={cn(
-                          "rounded-md border px-2 py-1 text-[11px] transition",
+                          "max-w-full break-all rounded-md border px-2 py-1 text-[11px] transition",
                           selectedTemplateVariables.has(variableName)
                             ? "border-primary/40 bg-primary/10 text-primary"
                             : "border-border bg-background/60 text-muted-foreground hover:text-foreground",
@@ -1360,7 +1523,7 @@ function TemplatesTab() {
                 />
               </div>
               {templateFile ? (
-                <div className="rounded-md border border-border bg-card/70 px-3 py-2 text-[11px] text-muted-foreground">
+                <div className="break-all rounded-md border border-border bg-card/70 px-3 py-2 text-[11px] text-muted-foreground">
                   {t("settings.templates.files.selectedFile")}: <span className="font-semibold text-foreground">{templateFile.name}</span>
                 </div>
               ) : null}
@@ -1374,7 +1537,7 @@ function TemplatesTab() {
             />
           </div>
 
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end">
             <UiButton type="button" size="sm" variant="ghost" onClick={() => void refreshTemplates()} className="w-full sm:w-auto">
               {t("settings.templates.files.refresh")}
             </UiButton>
@@ -1389,12 +1552,12 @@ function TemplatesTab() {
             ) : templates.length ? (
               templates.map((item) => (
                 <article key={item.id} className="space-y-2 rounded-md border border-border bg-card/70 p-3">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between">
                     <div className="min-w-0">
                       <p className="text-sm font-semibold text-foreground">{item.name}</p>
                       <p className="text-[11px] text-muted-foreground">{item.description || "-"}</p>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
                       <span className="rounded-md border border-border px-2 py-1 text-[10px] text-muted-foreground">{item.format}</span>
                       {item.isDefault ? (
                         <span className="rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-[10px] text-primary">
@@ -1403,7 +1566,7 @@ function TemplatesTab() {
                       ) : null}
                     </div>
                   </div>
-                  <div className="grid gap-2 text-[11px] text-muted-foreground sm:grid-cols-2 md:grid-cols-3">
+                  <div className="grid gap-2 text-[11px] text-muted-foreground sm:grid-cols-2 lg:grid-cols-3">
                     <p>{t("settings.templates.files.version")}: {item.versionNumber}</p>
                     <p className="break-all">{t("settings.templates.files.fileName")}: {item.fileName || "-"}</p>
                     <p>{t("settings.templates.files.fileSize")}: {bytesLabel(item.fileSize)}</p>
@@ -1413,7 +1576,7 @@ function TemplatesTab() {
                       {t("settings.templates.files.variables")}: {item.variables.join(", ")}
                     </p>
                   ) : null}
-                  <div className="flex flex-wrap items-center justify-end gap-2">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end">
                     {!item.isDefault ? (
                       <UiButton type="button" size="xs" variant="outline" onClick={() => void setAsDefaultTemplate(item.id)} className="w-full sm:w-auto">
                         {t("settings.templates.files.makeDefault")}
@@ -1433,11 +1596,11 @@ function TemplatesTab() {
       ) : null}
 
       {innerTab === "columns" ? (
-        <div className="space-y-2 rounded-md border border-border bg-background/20 p-3">
+        <div className="min-w-0 space-y-2 rounded-md border border-border bg-background/20 p-3">
         <p className="text-muted-foreground">{t("settings.templates.lineColumns")}</p>
         {columns.map((column) => (
-          <div key={column.id} className="grid items-end gap-2 rounded-sm border border-border bg-background/30 p-2 sm:grid-cols-2 lg:grid-cols-[1.2fr_1fr_1.4fr_auto_auto_auto]">
-            <div className="text-foreground">
+          <div key={column.id} className="grid items-end gap-2 rounded-sm border border-border bg-background/30 p-2 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.4fr)_auto_auto_auto]">
+            <div className="min-w-0 break-words text-foreground">
               <p className="font-semibold">{column.label}</p>
               <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{column.id}</p>
             </div>
@@ -1451,7 +1614,7 @@ function TemplatesTab() {
                 value: item.value,
                 label: t(item.labelKey),
               }))}
-              className="text-[11px]"
+              className="min-w-0 text-[11px]"
             />
             <FormField
               type="text"
@@ -1460,7 +1623,7 @@ function TemplatesTab() {
               disabled={column.system || column.dataType !== "select"}
               onChange={(value) => updateColumn(column.id, { selectOptions: parseSelectOptionsText(value) })}
               placeholder={t("settings.templates.placeholders.selectOptions")}
-              className="text-[11px]"
+              className="min-w-0 text-[11px] sm:col-span-2 xl:col-span-1"
             />
             <FormField
               type="checkbox"
@@ -1478,15 +1641,15 @@ function TemplatesTab() {
               onCheckedChange={(checked) => updateColumn(column.id, { required: checked })}
               className="px-2 py-1.5 text-[11px] sm:col-span-1"
             />
-            <UiButton type="button" size="sm" variant="danger" iconOnly iconName="remove" disabled={column.system} onClick={() => removeColumn(column.id)} className="justify-self-start sm:justify-self-end" />
+            <UiButton type="button" size="sm" variant="danger" iconOnly iconName="remove" disabled={column.system} onClick={() => removeColumn(column.id)} className="w-full justify-center sm:w-auto sm:justify-self-end" />
           </div>
         ))}
         </div>
       ) : null}
 
       {innerTab === "columns" ? (
-        <div className="space-y-2 rounded-md border border-border bg-background/20 p-3">
-          <div className="grid items-end gap-2 sm:grid-cols-2 lg:grid-cols-[2fr_1fr_1fr_auto]">
+        <div className="min-w-0 space-y-2 rounded-md border border-border bg-background/20 p-3">
+          <div className="grid items-end gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
             <FormField
               type="text"
               label={t("settings.templates.newColumnLabel")}
@@ -1505,7 +1668,7 @@ function TemplatesTab() {
               }))}
             />
             <FormField type="checkbox" label={t("settings.templates.required")} checked={newRequired} onCheckedChange={setNewRequired} />
-            <UiButton type="button" size="sm" iconOnly iconName="plus" variant="outline" onClick={addCustomColumn} className="justify-self-start sm:justify-self-end"/>
+            <UiButton type="button" size="sm" iconOnly iconName="plus" variant="outline" onClick={addCustomColumn} className="w-full justify-center sm:w-auto sm:justify-self-end"/>
           </div>
           {newType === "select" ? (
             <FormField
@@ -1522,7 +1685,7 @@ function TemplatesTab() {
       {innerTab === "columns" ? (
         <div className="flex flex-col items-start gap-2 rounded-md border border-border bg-background/30 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-muted-foreground">{t("settings.templates.exportHint")}</p>
-          <UiButton type="button" size="sm" variant="primary" onClick={saveColumns}>
+          <UiButton type="button" size="sm" variant="primary" onClick={saveColumns} className="w-full sm:w-auto">
             {t("settings.templates.saveColumns")}
           </UiButton>
         </div>
@@ -1548,6 +1711,636 @@ function TemplatesTab() {
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+type BillingAccountStatus = "TRIAL_ACTIVE" | "TRIAL_EXPIRED" | "GRACE" | "AWAITING_ACTIVATION" | "ACTIVE_PAID" | "LOCKED";
+type BillingProofMethod = "VIREMENT" | "WAFACASH" | "CASH" | "OTHER";
+type BillingProofStatus = "SUBMITTED" | "UNDER_REVIEW" | "APPROVED" | "REJECTED";
+const BILLING_PROOF_MAX_SIZE_BYTES = 8 * 1024 * 1024;
+const BILLING_PROOF_ALLOWED_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".webp"];
+const BILLING_METHOD_VALUES: BillingProofMethod[] = ["VIREMENT", "WAFACASH", "CASH", "OTHER"];
+
+type BillingLifecycle = {
+  accountStatus: BillingAccountStatus;
+  trialStartedAt: string | null;
+  trialEndsAt: string | null;
+  graceEndsAt: string | null;
+  awaitingActivationAt: string | null;
+  activatedAt: string | null;
+  lockedAt: string | null;
+  lockReason: string | null;
+  statusNote: string | null;
+};
+
+type BillingProofItem = {
+  id: string;
+  method: BillingProofMethod;
+  status: BillingProofStatus;
+  amount: number | null;
+  currency: string;
+  reference: string | null;
+  proofFilePath: string | null;
+  note: string | null;
+  reviewNote: string | null;
+  submittedAt: string;
+  reviewedAt: string | null;
+  submittedBy: {
+    id: string;
+    fullName: string;
+    email: string;
+  };
+  reviewedBy: {
+    id: string;
+    fullName: string;
+    email: string;
+  } | null;
+};
+
+type BillingUsageItem = {
+  used: number;
+  limit: number | null;
+  remaining: number | null;
+  planCode: string | null;
+  periodStart: string;
+  periodEnd: string;
+};
+
+type BillingUsageState = {
+  documents: BillingUsageItem;
+  exports: BillingUsageItem;
+};
+
+function toLocalDateLabel(value: string | null | undefined, locale: string) {
+  if (!value) {
+    return "-";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+  return new Intl.DateTimeFormat(locale === "ar" ? "ar-MA" : locale === "en" ? "en-US" : "fr-FR", {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+  }).format(date);
+}
+
+function toLocaleNumberLabel(value: number, locale: string) {
+  try {
+    return new Intl.NumberFormat(locale === "ar" ? "ar-MA" : locale === "en" ? "en-US" : "fr-FR").format(value);
+  } catch {
+    return String(value);
+  }
+}
+
+type BillingUsageTone = "normal" | "warning" | "critical" | "reached" | "unlimited" | "unknown";
+
+function resolveBillingUsageTone(item: BillingUsageItem | null) {
+  if (!item) {
+    return {
+      tone: "unknown" as BillingUsageTone,
+      percent: null as number | null,
+      progressPercent: 0,
+    };
+  }
+  if (item.limit == null) {
+    return {
+      tone: "unlimited" as BillingUsageTone,
+      percent: null as number | null,
+      progressPercent: 0,
+    };
+  }
+
+  const safeLimit = Math.max(0, item.limit);
+  if (safeLimit === 0) {
+    return {
+      tone: item.used > 0 ? ("reached" as BillingUsageTone) : ("normal" as BillingUsageTone),
+      percent: item.used > 0 ? 100 : 0,
+      progressPercent: item.used > 0 ? 100 : 0,
+    };
+  }
+
+  const rawPercent = (item.used / safeLimit) * 100;
+  const percent = Math.max(0, rawPercent);
+  const progressPercent = Math.min(100, percent);
+  const tone: BillingUsageTone = percent >= 100 ? "reached" : percent >= 90 ? "critical" : percent >= 70 ? "warning" : "normal";
+  return { tone, percent, progressPercent };
+}
+
+function toStatusBadgeClass(status: BillingProofStatus) {
+  if (status === "APPROVED") {
+    return "border-primary/45 bg-primary/10 text-primary";
+  }
+  if (status === "REJECTED") {
+    return "border-destructive/45 bg-destructive/12 text-destructive";
+  }
+  if (status === "UNDER_REVIEW") {
+    return "border-sky-500/45 bg-sky-500/12 text-sky-600 dark:text-sky-300";
+  }
+  return "border-amber-500/45 bg-amber-500/12 text-amber-700 dark:text-amber-300";
+}
+
+function fileSizeLabel(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes < 1) {
+    return "0 B";
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function BillingTab() {
+  const { t, locale } = useI18n();
+  const { success, error } = useToast();
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
+  const [canReview, setCanReview] = useState(false);
+  const [lifecycle, setLifecycle] = useState<BillingLifecycle | null>(null);
+  const [usage, setUsage] = useState<BillingUsageState | null>(null);
+  const [proofs, setProofs] = useState<BillingProofItem[]>([]);
+  const [method, setMethod] = useState<BillingProofMethod>("VIREMENT");
+  const [amount, setAmount] = useState("");
+  const [currency, setCurrency] = useState("MAD");
+  const [reference, setReference] = useState("");
+  const [note, setNote] = useState("");
+  const [proofFile, setProofFile] = useState<File | null>(null);
+  const [isDraggingProofFile, setIsDraggingProofFile] = useState(false);
+  const proofFileInputRef = useRef<HTMLInputElement | null>(null);
+  const billingMethodOptions = useMemo(
+    () =>
+      BILLING_METHOD_VALUES.map((value) => ({
+        value,
+        label: t(`settings.billing.method.${value.toLowerCase()}`),
+      })),
+    [t],
+  );
+  const proofMethodLabel = useCallback(
+    (nextMethod: BillingProofMethod) => billingMethodOptions.find((item) => item.value === nextMethod)?.label || nextMethod,
+    [billingMethodOptions],
+  );
+  const proofStatusLabel = useCallback(
+    (status: BillingProofStatus) => {
+      if (status === "APPROVED") {
+        return t("settings.billing.proofStatus.approved");
+      }
+      if (status === "REJECTED") {
+        return t("settings.billing.proofStatus.rejected");
+      }
+      if (status === "UNDER_REVIEW") {
+        return t("settings.billing.proofStatus.underReview");
+      }
+      return t("settings.billing.proofStatus.submitted");
+    },
+    [t],
+  );
+
+  const loadBilling = useCallback(async () => {
+    const [lifecycleResult, proofsResult, usageResult] = await Promise.all([
+      getCompanyLifecycleAction(),
+      listPaymentProofsAction({ limit: 20 }),
+      getCompanyUsageLimitsAction(),
+    ]);
+
+    if (!lifecycleResult.ok) {
+      error(t("settings.billing.toasts.loadLifecycleFailed"));
+      return;
+    }
+    setLifecycle(lifecycleResult.lifecycle as BillingLifecycle);
+
+    if (!proofsResult.ok) {
+      error(t("settings.billing.toasts.loadProofsFailed"));
+      return;
+    }
+    setCanReview(Boolean(proofsResult.canReview));
+    setProofs(proofsResult.items as BillingProofItem[]);
+
+    if (!usageResult.ok) {
+      error(t("settings.billing.toasts.loadUsageFailed"));
+      return;
+    }
+    setUsage(usageResult.usage as BillingUsageState);
+  }, [error, t]);
+
+  useEffect(() => {
+    let mounted = true;
+    void (async () => {
+      try {
+        await loadBilling();
+      } catch {
+        if (mounted) {
+          error(t("settings.billing.toasts.loadFailed"));
+        }
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [error, loadBilling, t]);
+
+  const statusTitle = lifecycle
+    ? lifecycle.accountStatus === "TRIAL_ACTIVE"
+      ? t("account.status.trialActive")
+      : lifecycle.accountStatus === "TRIAL_EXPIRED"
+        ? t("account.status.trialExpired")
+        : lifecycle.accountStatus === "GRACE"
+          ? t("account.status.grace")
+          : lifecycle.accountStatus === "AWAITING_ACTIVATION"
+            ? t("account.status.awaitingActivation")
+            : lifecycle.accountStatus === "LOCKED"
+              ? t("account.status.locked")
+              : t("settings.billing.accountStatus.paid")
+    : "-";
+  const usagePeriodStart = usage ? toLocalDateLabel(usage.documents.periodStart, locale) : "-";
+  const usagePeriodEnd = usage ? toLocalDateLabel(usage.documents.periodEnd, locale) : "-";
+  const usageRows: Array<{ key: "documents" | "exports"; item: BillingUsageItem | null }> = [
+    { key: "documents", item: usage?.documents || null },
+    { key: "exports", item: usage?.exports || null },
+  ];
+
+  const onProofFileChange = useCallback((nextFile: File | null) => {
+    if (!nextFile) {
+      setProofFile(null);
+      return;
+    }
+    const lowerName = nextFile.name.toLowerCase();
+    if (!BILLING_PROOF_ALLOWED_EXTENSIONS.some((extension) => lowerName.endsWith(extension))) {
+      error(t("settings.billing.toasts.unsupportedProofFormat"));
+      return;
+    }
+    if (nextFile.size > BILLING_PROOF_MAX_SIZE_BYTES) {
+      error(t("settings.billing.toasts.proofTooLarge").replace("{size}", fileSizeLabel(BILLING_PROOF_MAX_SIZE_BYTES)));
+      return;
+    }
+    setProofFile(nextFile);
+  }, [error, t]);
+
+  const submitProof = async () => {
+    const parsedAmount = amount.trim().length ? Number.parseFloat(amount) : null;
+    if (amount.trim().length && (!Number.isFinite(parsedAmount || NaN) || (parsedAmount || 0) <= 0)) {
+      error(t("settings.billing.toasts.invalidAmount"));
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const formData = new FormData();
+      formData.set("method", method);
+      formData.set("amount", amount.trim());
+      formData.set("currency", currency);
+      formData.set("reference", reference);
+      formData.set("note", note);
+      if (proofFile) {
+        formData.set("proofFile", proofFile);
+      }
+      const result = await submitPaymentProofWithFileAction(formData);
+      if (!result.ok) {
+        error(result.error || t("settings.billing.toasts.submitFailed"));
+        return;
+      }
+      success(t("settings.billing.toasts.submitted"));
+      setAmount("");
+      setReference("");
+      setNote("");
+      setProofFile(null);
+      if (proofFileInputRef.current) {
+        proofFileInputRef.current.value = "";
+      }
+      await loadBilling();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const reviewProof = async (proofId: string, status: BillingProofStatus) => {
+    setReviewingId(proofId);
+    try {
+      const result = await reviewPaymentProofAction({
+        paymentProofId: proofId,
+        status,
+      });
+      if (!result.ok) {
+        error(result.error || t("settings.billing.toasts.reviewFailed"));
+        return;
+      }
+      success(t("settings.billing.toasts.reviewUpdated"));
+      await loadBilling();
+    } finally {
+      setReviewingId(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className={SETTINGS_PANEL_CLASS}>
+        <p className="text-xs text-muted-foreground">{t("settings.billing.loading")}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className={SETTINGS_PANEL_CLASS}>
+      <div className="rounded-md border border-border bg-background/20 p-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="inline-flex items-center gap-1 text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+              <HugIcon icon={LegalDocument02Icon} size={14} />
+              {t("settings.billing.accountStatus.title")}
+            </p>
+            <p className="mt-1 text-sm font-semibold text-foreground">{statusTitle}</p>
+          </div>
+          {lifecycle?.statusNote ? (
+            <span className="max-w-full break-words rounded-sm border border-border bg-card/70 px-2 py-1 text-[10px] text-muted-foreground">{lifecycle.statusNote}</span>
+          ) : null}
+        </div>
+        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          <div className="rounded-sm border border-border bg-card/70 px-3 py-2">
+            <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">{t("settings.billing.accountStatus.trialEnds")}</p>
+            <p className="mt-1 text-xs text-foreground">{toLocalDateLabel(lifecycle?.trialEndsAt, locale)}</p>
+          </div>
+          <div className="rounded-sm border border-border bg-card/70 px-3 py-2">
+            <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">{t("settings.billing.accountStatus.graceEnds")}</p>
+            <p className="mt-1 text-xs text-foreground">{toLocalDateLabel(lifecycle?.graceEndsAt, locale)}</p>
+          </div>
+          <div className="rounded-sm border border-border bg-card/70 px-3 py-2">
+            <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">{t("settings.billing.accountStatus.lockedAt")}</p>
+            <p className="mt-1 text-xs text-foreground">{toLocalDateLabel(lifecycle?.lockedAt, locale)}</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-md border border-border bg-background/20 p-3">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <p className="inline-flex items-center gap-1 text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+            <HugIcon icon={FileExportIcon} size={14} />
+            {t("settings.billing.usage.title")}
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            {t("settings.billing.usage.period")
+              .replace("{start}", usagePeriodStart)
+              .replace("{end}", usagePeriodEnd)}
+          </p>
+        </div>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {usageRows.map(({ key, item }) => {
+            const usageLabel = key === "documents" ? t("settings.billing.usage.documents") : t("settings.billing.usage.exports");
+            const usedLabel = toLocaleNumberLabel(item?.used ?? 0, locale);
+            const limitValue = item?.limit;
+            const limitLabel = limitValue == null ? t("settings.billing.usage.unlimited") : toLocaleNumberLabel(limitValue, locale);
+            const remainingLabel =
+              item?.remaining == null ? t("settings.billing.usage.unlimited") : toLocaleNumberLabel(Math.max(0, item.remaining), locale);
+            const usageState = resolveBillingUsageTone(item);
+            const roundedPercent =
+              usageState.percent == null ? null : Math.max(0, Math.min(999, Math.round(usageState.percent * 10) / 10));
+            const percentLabel = roundedPercent == null ? "-" : toLocaleNumberLabel(roundedPercent, locale);
+            const reached = usageState.tone === "reached";
+            const stateLabel =
+              usageState.tone === "unlimited"
+                ? t("settings.billing.usage.stateUnlimited")
+                : usageState.tone === "reached"
+                  ? t("settings.billing.usage.stateReached").replace("{value}", percentLabel)
+                  : usageState.tone === "critical"
+                    ? t("settings.billing.usage.stateCritical").replace("{value}", percentLabel)
+                    : usageState.tone === "warning"
+                      ? t("settings.billing.usage.stateWarning").replace("{value}", percentLabel)
+                      : usageState.tone === "normal"
+                        ? t("settings.billing.usage.stateNormal").replace("{value}", percentLabel)
+                        : t("settings.billing.usage.stateUnknown");
+            const stateTextClass =
+              usageState.tone === "reached"
+                ? "text-destructive"
+                : usageState.tone === "critical"
+                  ? "text-amber-700 dark:text-amber-300"
+                  : usageState.tone === "warning"
+                    ? "text-amber-700 dark:text-amber-300"
+                    : usageState.tone === "normal"
+                      ? "text-primary"
+                      : "text-muted-foreground";
+            const progressClass =
+              usageState.tone === "reached"
+                ? "bg-destructive"
+                : usageState.tone === "critical"
+                  ? "bg-amber-500"
+                  : usageState.tone === "warning"
+                    ? "bg-amber-500"
+                    : "bg-primary";
+            return (
+              <article
+                key={key}
+                className={cn(
+                  "rounded-sm border px-3 py-2",
+                  reached ? "border-destructive/45 bg-destructive/10" : "border-border bg-card/70",
+                )}
+              >
+                <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">{usageLabel}</p>
+                <p className="mt-1 text-sm font-semibold text-foreground">
+                  {t("settings.billing.usage.used")
+                    .replace("{used}", usedLabel)
+                    .replace("{limit}", limitLabel)}
+                </p>
+                {item?.limit != null ? (
+                  <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-border/70">
+                    <div
+                      className={cn("h-full rounded-full transition-all", progressClass)}
+                      style={{ width: `${Math.max(0, Math.min(100, usageState.progressPercent))}%` }}
+                    />
+                  </div>
+                ) : null}
+                <p className={cn("mt-1 text-xs", reached ? "text-destructive" : "text-muted-foreground")}>
+                  {t("settings.billing.usage.remaining").replace("{value}", remainingLabel)}
+                </p>
+                <p className={cn("mt-1 text-[11px] font-semibold", stateTextClass)}>{stateLabel}</p>
+              </article>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="rounded-md border border-border bg-background/20 p-3">
+        <p className="inline-flex items-center gap-1 text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+          <HugIcon icon={CloudUploadIcon} size={14} />
+          {t("settings.billing.submit.title")}
+        </p>
+        <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1.8fr)_minmax(0,1fr)]">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <FormField
+              type="select"
+              label={t("settings.billing.submit.method")}
+              value={method}
+              onChange={(value) => setMethod(value as BillingProofMethod)}
+              options={billingMethodOptions}
+            />
+            <FormField
+              type="number"
+              label={t("settings.billing.submit.amount")}
+              value={amount}
+              onChange={setAmount}
+              placeholder={t("settings.billing.submit.amountPlaceholder")}
+              min={0}
+              step="0.01"
+            />
+            <FormField
+              type="text"
+              label={t("settings.billing.submit.currency")}
+              value={currency}
+              onChange={setCurrency}
+              placeholder={t("settings.billing.submit.currencyPlaceholder")}
+            />
+            <FormField
+              type="text"
+              label={t("settings.billing.submit.reference")}
+              value={reference}
+              onChange={setReference}
+              placeholder={t("settings.billing.submit.referencePlaceholder")}
+            />
+            <FormField
+              type="text"
+              label={t("settings.billing.submit.note")}
+              value={note}
+              onChange={setNote}
+              placeholder={t("settings.billing.submit.notePlaceholder")}
+              className="sm:col-span-2 xl:col-span-4"
+            />
+          </div>
+          <div className="space-y-2">
+            <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("settings.billing.proofFile.title")}</p>
+            <div
+              onDragOver={(event) => {
+                event.preventDefault();
+                setIsDraggingProofFile(true);
+              }}
+              onDragLeave={() => setIsDraggingProofFile(false)}
+              onDrop={(event) => {
+                event.preventDefault();
+                setIsDraggingProofFile(false);
+                onProofFileChange(event.dataTransfer.files?.[0] ?? null);
+              }}
+              className={cn(
+                "rounded-md border-2 border-dashed bg-background/40 p-3 transition",
+                isDraggingProofFile ? "border-primary/50 bg-primary/5" : "border-border",
+              )}
+            >
+              <div className="flex flex-col items-center gap-2 text-center">
+                <HugIcon icon={CloudUploadIcon} size={18} />
+                <p className="text-xs font-semibold text-foreground">
+                  {proofFile ? t("settings.billing.proofFile.replace") : t("settings.billing.proofFile.upload")}
+                </p>
+                <p className="text-[11px] text-muted-foreground">{t("settings.billing.proofFile.hint")}</p>
+                <UiButton type="button" size="xs" variant="outline" onClick={() => proofFileInputRef.current?.click()}>
+                  {proofFile ? t("settings.billing.proofFile.change") : t("settings.billing.proofFile.browse")}
+                </UiButton>
+              </div>
+              <input
+                ref={proofFileInputRef}
+                type="file"
+                accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp"
+                onChange={(event) => onProofFileChange(event.target.files?.[0] ?? null)}
+                className="hidden"
+              />
+            </div>
+            {proofFile ? (
+              <div className="break-all rounded-sm border border-border bg-card/70 px-3 py-2 text-[11px] text-muted-foreground">
+                {t("settings.billing.proofFile.selected").replace("{name}", proofFile.name).replace("{size}", fileSizeLabel(proofFile.size))}
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">
+                {t("settings.billing.proofFile.acceptedFormats").replace("{formats}", BILLING_PROOF_ALLOWED_EXTENSIONS.join(", "))}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="mt-3 flex justify-end">
+          <UiButton type="button" size="sm" variant="primary" iconName="import" onClick={() => void submitProof()} disabled={submitting}>
+            {submitting ? t("settings.billing.submit.submitting") : t("settings.billing.submit.submit")}
+          </UiButton>
+        </div>
+      </div>
+
+      <div className="rounded-md border border-border bg-background/20 p-3">
+        <p className="inline-flex items-center gap-1 text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+          <HugIcon icon={FileExportIcon} size={14} />
+          {t("settings.billing.history.title")}
+        </p>
+        <div className="mt-3 space-y-2">
+          {proofs.length ? (
+            proofs.map((item) => (
+              <article key={item.id} className="space-y-3 rounded-md border border-border bg-card/70 p-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">{proofMethodLabel(item.method)}</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {item.submittedBy
+                        ? t("settings.billing.history.submittedOnBy")
+                            .replace("{date}", toLocalDateLabel(item.submittedAt, locale))
+                            .replace("{name}", item.submittedBy.fullName)
+                        : t("settings.billing.history.submittedOnOnly").replace("{date}", toLocalDateLabel(item.submittedAt, locale))}
+                    </p>
+                  </div>
+                  <span className={cn("inline-flex rounded-sm border px-2 py-1 text-[10px] font-semibold", toStatusBadgeClass(item.status))}>
+                    {proofStatusLabel(item.status)}
+                  </span>
+                </div>
+                <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+                  <p>{t("settings.billing.history.amount").replace("{value}", item.amount == null ? "-" : `${item.amount.toFixed(2)} ${item.currency}`)}</p>
+                  <p>{t("settings.billing.history.reference").replace("{value}", item.reference || "-")}</p>
+                  <p>{t("settings.billing.history.reviewedAt").replace("{value}", toLocalDateLabel(item.reviewedAt, locale))}</p>
+                </div>
+                {item.proofFilePath ? (
+                  <p className="break-all text-xs text-muted-foreground">{t("settings.billing.history.proofFile").replace("{value}", item.proofFilePath)}</p>
+                ) : null}
+                {item.note ? <p className="text-xs text-muted-foreground">{t("settings.billing.history.note").replace("{value}", item.note)}</p> : null}
+                {item.reviewNote ? <p className="text-xs text-muted-foreground">{t("settings.billing.history.reviewNote").replace("{value}", item.reviewNote)}</p> : null}
+                {canReview ? (
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <UiButton
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      iconName="notification"
+                      onClick={() => void reviewProof(item.id, "UNDER_REVIEW")}
+                      disabled={reviewingId === item.id}
+                    >
+                      {t("settings.billing.actions.underReview")}
+                    </UiButton>
+                    <UiButton
+                      type="button"
+                      size="xs"
+                      variant="primary"
+                      iconName="plus"
+                      onClick={() => void reviewProof(item.id, "APPROVED")}
+                      disabled={reviewingId === item.id}
+                    >
+                      {t("settings.billing.actions.approve")}
+                    </UiButton>
+                    <UiButton
+                      type="button"
+                      size="xs"
+                      variant="danger"
+                      iconName="remove"
+                      onClick={() => void reviewProof(item.id, "REJECTED")}
+                      disabled={reviewingId === item.id}
+                    >
+                      {t("settings.billing.actions.reject")}
+                    </UiButton>
+                  </div>
+                ) : null}
+              </article>
+            ))
+          ) : (
+            <p className="text-xs text-muted-foreground">{t("settings.billing.history.empty")}</p>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1661,6 +2454,7 @@ function NotificationsTab() {
           <FormField type="checkbox" label={t("settings.notifications.notifyOverdue")} checked={values.notifyOverdue} onCheckedChange={(checked) => updateBoolean("notifyOverdue", checked)} />
           <FormField type="checkbox" label={t("settings.notifications.notifyDraftStale")} checked={values.notifyDraftStale} onCheckedChange={(checked) => updateBoolean("notifyDraftStale", checked)} />
           <FormField type="checkbox" label={t("settings.notifications.notifyStatusChanges")} checked={values.notifyStatusChanges} onCheckedChange={(checked) => updateBoolean("notifyStatusChanges", checked)} />
+          <FormField type="checkbox" label={t("settings.notifications.notifyUsageLimits")} checked={values.notifyUsageLimits} onCheckedChange={(checked) => updateBoolean("notifyUsageLimits", checked)} />
           <FormField type="checkbox" label={t("settings.notifications.notifyEmailFailures")} checked={values.notifyEmailFailures} onCheckedChange={(checked) => updateBoolean("notifyEmailFailures", checked)} />
           <FormField type="checkbox" label={t("settings.notifications.notifyExportFailures")} checked={values.notifyExportFailures} onCheckedChange={(checked) => updateBoolean("notifyExportFailures", checked)} />
         </div>

@@ -16,9 +16,10 @@ type DocumentExportRow = {
 type ExportDocumentsListButtonProps = {
   rows: DocumentExportRow[];
   label: string;
+  disabled?: boolean;
 };
 
-export function ExportDocumentsListButton({ rows, label }: ExportDocumentsListButtonProps) {
+export function ExportDocumentsListButton({ rows, label, disabled = false }: ExportDocumentsListButtonProps) {
   const exportRows = () => {
     const worksheetData = rows.map((row) => ({
       Number: row.number,
@@ -52,7 +53,7 @@ export function ExportDocumentsListButton({ rows, label }: ExportDocumentsListBu
       variant="subtle"
       iconName="export"
       label={label}
-      disabled={!rows.length}
+      disabled={disabled || !rows.length}
       onClick={exportRows}
     />
   );

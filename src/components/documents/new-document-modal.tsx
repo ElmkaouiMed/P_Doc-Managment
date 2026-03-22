@@ -21,6 +21,7 @@ import {
   applyEmailTemplateVariables,
   emitWorkspaceEvent,
   DocumentType,
+  EmailTemplateSettings,
   STORE_EVENTS,
   StoredArticle,
   DOCUMENT_TYPE_OPTIONS,
@@ -200,6 +201,7 @@ function getDefaultType(enabledTypes: DocumentType[]) {
 }
 
 const DEFAULT_UNITS = ["u", "kg", "m", "m2", "m3", "h", "jour", "forfait"];
+const DEFAULT_ENABLED_DOCUMENT_TYPES: DocumentType[] = ["DEVIS", "FACTURE", "FACTURE_PROFORMA", "BON_LIVRAISON", "BON_COMMANDE"];
 const DEFAULT_TEMPLATE_COLUMNS: TemplateLineColumn[] = [
   { id: "designation", label: "Designation", dataType: "text", required: true, enabled: true, system: true },
   { id: "unite", label: "Unite", dataType: "unit", required: false, enabled: true, system: true },
@@ -237,7 +239,7 @@ export function NewDocumentModal({
   const isOpen = isControlled ? open : localOpen;
   const isEditing = Boolean(initialDocument?.id);
   const [step, setStep] = useState<WizardStep>("type");
-  const [enabledTypes, setEnabledTypes] = useState<DocumentType[]>(["DEVIS", "FACTURE", "FACTURE_PROFORMA", "BON_LIVRAISON", "BON_COMMANDE"]);
+  const [enabledTypes, setEnabledTypes] = useState<DocumentType[]>(DEFAULT_ENABLED_DOCUMENT_TYPES);
   const [type, setType] = useState<DocumentType>("DEVIS");
   const [tvaRate, setTvaRate] = useState<number>(20);
   const [autoFillArticleUnitPrice, setAutoFillArticleUnitPrice] = useState<boolean>(true);
@@ -328,17 +330,17 @@ export function NewDocumentModal({
         return;
       }
 
-      const configuredTypes = businessResult.ok
-        ? (businessResult.config.enabledDocumentTypes as DocumentType[])
-        : ["DEVIS", "FACTURE", "FACTURE_PROFORMA", "BON_LIVRAISON", "BON_COMMANDE"];
+      const configuredTypes: DocumentType[] = businessResult.ok
+        ? [...businessResult.config.enabledDocumentTypes]
+        : DEFAULT_ENABLED_DOCUMENT_TYPES;
       const preferredType = initialDocument
         ? initialDocument.type
         : getDefaultType(configuredTypes);
-      const nextEnabledTypes =
+      const nextEnabledTypes: DocumentType[] =
         initialDocument && !configuredTypes.includes(preferredType)
           ? [preferredType, ...configuredTypes]
           : configuredTypes;
-      const nextType =
+      const nextType: DocumentType =
         initialDocument
           ? preferredType
           : (nextEnabledTypes.includes(preferredType) ? preferredType : getDefaultType(nextEnabledTypes));

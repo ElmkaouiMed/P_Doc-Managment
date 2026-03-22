@@ -5,12 +5,17 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:desktop": "node scripts/build-desktop.mjs",
     "start": "next start",
     "lint": "eslint",
     "db:format": "prisma format",
     "db:generate": "prisma generate",
+    "db:generate:desktop": "node ../scripts/make-desktop-schema.cjs && prisma generate --schema prisma/schema.desktop.prisma",
     "db:migrate": "prisma migrate dev",
-    "db:deploy": "prisma migrate deploy"
+    "db:deploy": "prisma migrate deploy",
+    "db:push:desktop": "node ../scripts/make-desktop-schema.cjs && node scripts/apply-desktop-schema.mjs",
+    "db:bootstrap:desktop": "node scripts/bootstrap-desktop.mjs",
+    "db:seed:platform-owner": "node prisma/seed-platform-admin.mjs"
   },
   "dependencies": {
     "@hugeicons/core-free-icons": "^3.3.0",

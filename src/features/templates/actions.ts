@@ -1,20 +1,24 @@
 "use server";
 
-import { DocumentStatus, DocumentType, ExportFormat, TemplateFormat } from "@prisma/client";
+import { DocumentStatus, DocumentType, ExportFormat, TemplateFormat } from "@/lib/db-client";
 import { mkdir, readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
 
-import { getCompanyWriteAccessError, requireAuthContext } from "@/features/auth/lib/session";
+import { getCompanyActionAccessError, getCompanyWriteAccessError, requireAuthContext } from "@/features/auth/lib/session";
+import { ensureCompanyUsageWithinLimit, getCompanyUsageLimitSnapshot } from "@/features/billing/lib/usage-limits";
+import { notifyUsageLimitThreshold } from "@/features/notifications/service";
 import type { TemplateAssetRow } from "@/features/templates/types";
 import { prisma } from "@/lib/db";
+import { getDocumentEngineCapabilities, getDocumentEngineToken, getDocumentEngineUrl } from "@/lib/document-engine";
+import { getStorageRoot } from "@/lib/storage";
 
 const MAX_TEMPLATE_FILE_SIZE = 8 * 1024 * 1024;
-const STORAGE_ROOT = path.resolve(process.cwd(), "..", "storage");
+const STORAGE_ROOT = getStorageRoot();
 const IMPORTS_ROOT = path.resolve(STORAGE_ROOT, "document-imports");
 const TEMPLATE_COLUMNS_KEY_PREFIX = "template-columns:";
 const DEFAULT_TEMPLATE_COLUMN_IDS = ["designation", "unite", "qte", "pu", "pt"] as const;
-const DOCUMENT_ENGINE_URL = (process.env.DOCUMENT_ENGINE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
-const DOCUMENT_ENGINE_TOKEN = (process.env.DOCUMENT_ENGINE_TOKEN || "").trim();
+const DOCUMENT_ENGINE_URL = getDocumentEngineUrl();
+const DOCUMENT_ENGINE_TOKEN = getDocumentEngineToken();
 const ALLOWED_EXTENSIONS: Record<string, TemplateFormat> = {
   ".docx": TemplateFormat.DOCX,
   ".xlsx": TemplateFormat.XLSX,
@@ -1321,12 +1325,13 @@ async function buildDirectXlsxFromImportedSource(input: {
     },
   };
   const body = new FormData();
+  const sourceBytes = Uint8Array.from(bytes);
   body.set("data", JSON.stringify(enginePayload));
   body.set("output_name", preferredName);
   body.set("output_format", "xlsx");
   body.set(
     "file",
-    new Blob([bytes], {
+    new Blob([sourceBytes], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     }),
     importJob.sourceFileName || preferredName,
@@ -1417,8 +1422,36 @@ async function buildDirectXlsxExportWithoutTemplate(input: {
   };
 }
 
+async function notifyExportUsageThreshold(companyId: string, documentId: string) {
+  const snapshot = await getCompanyUsageLimitSnapshot(companyId, "exports_per_month");
+  if (snapshot.limit == null) {
+    return;
+  }
+
+  await notifyUsageLimitThreshold({
+    companyId,
+    documentId,
+    metric: "exports_per_month",
+    used: snapshot.used,
+    limit: snapshot.limit,
+    periodStart: snapshot.period.start,
+    periodEnd: snapshot.period.end,
+  });
+}
+
 export async function generateDocumentExportAction(input: QueueDocumentExportInput) {
   const auth = await requireAuthContext();
+  const exportAccessError = getCompanyActionAccessError(auth, "export");
+  if (exportAccessError) {
+    return { ok: false as const, error: exportAccessError };
+  }
+  const limitCheck = await ensureCompanyUsageWithinLimit({
+    companyId: auth.company.id,
+    key: "exports_per_month",
+  });
+  if (!limitCheck.ok) {
+    return { ok: false as const, error: limitCheck.error || "Monthly export limit reached." };
+  }
   const documentId = input.documentId.trim();
   if (!documentId) {
     return { ok: false as const, error: "Document id is required." };
@@ -1449,6 +1482,15 @@ export async function generateDocumentExportAction(input: QueueDocumentExportInp
   const missingUnitPriceError = summarizeLinesMissingUnitPrice(document.lineItems);
   if (missingUnitPriceError) {
     return { ok: false as const, error: missingUnitPriceError };
+  }
+  if (input.exportFormat === ExportFormat.PDF) {
+    const capabilities = await getDocumentEngineCapabilities();
+    if (!capabilities.pdf.supported) {
+      return {
+        ok: false as const,
+        error: capabilities.pdf.message || "PDF export is unavailable on this desktop installation.",
+      };
+    }
   }
 
   const targetTemplateFormat = templateFormatByExportFormat(input.exportFormat);
@@ -1545,6 +1587,7 @@ export async function generateDocumentExportAction(input: QueueDocumentExportInp
         actorId: auth.user.id,
         documentId: document.id,
       });
+      await notifyExportUsageThreshold(auth.company.id, document.id).catch(() => undefined);
 
       return {
         ok: true as const,
@@ -1571,6 +1614,12 @@ export async function generateDocumentExportAction(input: QueueDocumentExportInp
 
       return { ok: false as const, error: message };
     }
+  }
+  if (!template) {
+    return {
+      ok: false as const,
+      error: `No active ${targetTemplateFormat} template is available for this document type.`,
+    };
   }
 
   const selectedVersion = template.versions[0];
@@ -1661,6 +1710,7 @@ export async function generateDocumentExportAction(input: QueueDocumentExportInp
       actorId: auth.user.id,
       documentId: document.id,
     });
+    await notifyExportUsageThreshold(auth.company.id, document.id).catch(() => undefined);
 
     return {
       ok: true as const,
@@ -1691,6 +1741,17 @@ export async function generateDocumentExportAction(input: QueueDocumentExportInp
 
 export async function queueDocumentExportAction(input: QueueDocumentExportInput) {
   const auth = await requireAuthContext();
+  const exportAccessError = getCompanyActionAccessError(auth, "export");
+  if (exportAccessError) {
+    return { ok: false as const, error: exportAccessError };
+  }
+  const limitCheck = await ensureCompanyUsageWithinLimit({
+    companyId: auth.company.id,
+    key: "exports_per_month",
+  });
+  if (!limitCheck.ok) {
+    return { ok: false as const, error: limitCheck.error || "Monthly export limit reached." };
+  }
   const documentId = input.documentId.trim();
   if (!documentId) {
     return { ok: false as const, error: "Document id is required." };
@@ -1756,6 +1817,8 @@ export async function queueDocumentExportAction(input: QueueDocumentExportInput)
       createdAt: true,
     },
   });
+
+  await notifyExportUsageThreshold(auth.company.id, document.id).catch(() => undefined);
 
   return {
     ok: true as const,

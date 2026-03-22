@@ -1,11 +1,13 @@
-import { DocumentType } from "@prisma/client";
+import { DocumentType } from "@/lib/db-client";
 
 import { NewDocumentModal } from "@/components/documents/new-document-modal";
 import { StatCard } from "@/components/common/stat-card";
+import { PageEducationBanner } from "@/components/marketing/page-education-banner";
 import { DocumentsTable } from "@/features/documents/components/documents-table";
 import { ExportDocumentsListButton } from "@/features/documents/components/export-documents-list-button";
 import { ExtractImportPanel } from "@/features/documents/components/extract-import-panel";
 import { requireAuthContext } from "@/features/auth/lib/session";
+import { hasCompanyAccess } from "@/features/billing/lib/account-lifecycle";
 import { getServerI18n } from "@/i18n/server";
 import { prisma } from "@/lib/db";
 
@@ -20,6 +22,7 @@ function isOverdueStatusCandidate(status: string) {
 
 export default async function DocumentsPage() {
   const auth = await requireAuthContext();
+  const canAuthor = hasCompanyAccess(auth.company.accountStatus, "author");
   const { t } = await getServerI18n();
   const documents = await prisma.document.findMany({
     where: { companyId: auth.company.id },
@@ -85,11 +88,29 @@ export default async function DocumentsPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <NewDocumentModal />
-          <ExtractImportPanel />
-          <ExportDocumentsListButton rows={rows} label={t("documents.page.exportList")} />
+          {canAuthor ? <NewDocumentModal /> : null}
+          {canAuthor ? <ExtractImportPanel /> : null}
+          <ExportDocumentsListButton rows={rows} label={t("documents.page.exportList")} disabled={!canAuthor} />
         </div>
       </header>
+
+      <PageEducationBanner
+        title={t("education.banner.documents.title")}
+        description={t("education.banner.documents.description")}
+        videoLabel={t("education.banner.common.watchVideo")}
+        videoHref="https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+        helpLabel={t("education.banner.common.needHelp")}
+        supportTitle={t("education.banner.support.title")}
+        supportDescription={t("education.banner.support.description")}
+        supportCallLabel={t("education.banner.support.call")}
+        supportCloseLabel={t("education.banner.support.close")}
+        sourceSection="education-documents"
+        checklist={[
+          t("education.banner.documents.point1"),
+          t("education.banner.documents.point2"),
+          t("education.banner.documents.point3"),
+        ]}
+      />
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <StatCard

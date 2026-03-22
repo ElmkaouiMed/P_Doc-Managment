@@ -45,17 +45,39 @@ function dateLabel(input: string, locale: "fr" | "en" | "ar") {
   }).format(value);
 }
 
-function notificationTone(type: string) {
-  if (type === "OVERDUE" || type === "EMAIL_FAILED" || type === "EXPORT_FAILED") {
+function isUsageLimitNotification(item: NotificationFeedItem) {
+  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : null;
+  return item.type === "STATUS_CHANGED" && toText(metadata?.notificationKind).toUpperCase() === "USAGE_LIMIT";
+}
+
+function notificationTone(item: NotificationFeedItem) {
+  if (isUsageLimitNotification(item)) {
+    const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : null;
+    const threshold = toInt(metadata?.threshold);
+    if (threshold >= 100) {
+      return "border-destructive/40";
+    }
+    if (threshold >= 90 || threshold >= 70) {
+      return "border-amber-400/40";
+    }
+    return "border-primary/40";
+  }
+
+  if (item.type === "OVERDUE" || item.type === "EMAIL_FAILED" || item.type === "EXPORT_FAILED") {
     return "border-destructive/40";
   }
-  if (type === "DUE_SOON" || type === "DRAFT_STALE") {
+  if (item.type === "DUE_SOON" || item.type === "DRAFT_STALE") {
     return "border-amber-400/40";
   }
   return "border-border";
 }
 
-function notificationTitle(type: string, fallback: string, t: (key: string) => string) {
+function notificationTitle(item: NotificationFeedItem, fallback: string, t: (key: string) => string) {
+  if (isUsageLimitNotification(item)) {
+    const usageTitle = t("notifications.type.usageLimit");
+    return usageTitle === "notifications.type.usageLimit" ? fallback || usageTitle : usageTitle;
+  }
+
   const keyByType: Record<string, string> = {
     DUE_SOON: "notifications.type.dueSoon",
     OVERDUE: "notifications.type.overdue",
@@ -64,7 +86,7 @@ function notificationTitle(type: string, fallback: string, t: (key: string) => s
     EMAIL_FAILED: "notifications.type.emailFailed",
     EXPORT_FAILED: "notifications.type.exportFailed",
   };
-  const key = keyByType[type];
+  const key = keyByType[item.type];
   if (!key) {
     return fallback || t("header.notifications");
   }
@@ -108,6 +130,26 @@ function notificationBody(item: NotificationFeedItem, locale: "fr" | "en" | "ar"
   const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : null;
   if (!metadata) {
     return item.body || t("notifications.body.fallback");
+  }
+
+  if (isUsageLimitNotification(item)) {
+    const metric = toText(metadata.metric).toLowerCase();
+    const metricLabel =
+      metric === "documents_per_month" ? t("notifications.usage.metric.documents") : t("notifications.usage.metric.exports");
+    const used = String(toInt(metadata.used));
+    const limit = String(toInt(metadata.limit));
+    const threshold = String(toInt(metadata.threshold));
+    if (toInt(metadata.threshold) >= 100) {
+      return t("notifications.body.usageReached")
+        .replace("{metric}", metricLabel)
+        .replace("{used}", used)
+        .replace("{limit}", limit);
+    }
+    return t("notifications.body.usageThreshold")
+      .replace("{metric}", metricLabel)
+      .replace("{threshold}", threshold)
+      .replace("{used}", used)
+      .replace("{limit}", limit);
   }
 
   const number = toText(metadata.documentNumber) || "-";
@@ -263,7 +305,7 @@ export function NotificationCenter() {
   };
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} className="relative z-50">
       <UiButton
         type="button"
         size="md"
@@ -281,13 +323,13 @@ export function NotificationCenter() {
         }}
       />
       {unreadCount > 0 ? (
-        <span className="pointer-events-none absolute -top-1 -right-1 inline-flex min-w-5 items-center justify-center rounded-full border border-primary/60 bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
+        <span className="pointer-events-none z-50 absolute -top-1 -right-1 inline-flex min-w-5 items-center justify-center rounded-full border border-primary/60 bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
           {Math.min(99, unreadCount)}
         </span>
       ) : null}
 
       {open ? (
-        <div className="absolute top-14 rtl:left-0 ltr:right-0 z-50 w-[360px] max-w-[calc(100vw-2rem)] space-y-2 rounded-md border border-border bg-card/95 p-2 shadow-xl shadow-black/40">
+        <div className="absolute top-14 rtl:left-0 ltr:right-0 z-50 w-[360px] max-w-[calc(100vw-2rem)] space-y-2 rounded-md border border-border bg-card/95 p-2 shadow-lg shadow-black/10">
           <div className="flex items-center justify-between px-1">
             <p className="text-xs font-semibold text-foreground">{t("header.notifications")}</p>
             {unreadItemsCount > 0 ? (
@@ -297,7 +339,7 @@ export function NotificationCenter() {
             ) : null}
           </div>
 
-          <div className="max-h-52 space-y-2 overflow-y-auto pr-1">
+          <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
             {loading ? (
               <p className="rounded-md border border-border bg-background/40 p-3 text-xs text-muted-foreground">{t("header.notificationsLoading")}</p>
             ) : items.length ? (
@@ -308,13 +350,13 @@ export function NotificationCenter() {
                   onClick={() => void openNotification(item)}
                   className={cn(
                     "w-full rounded-md border bg-background/40 p-3 text-left transition hover:border-primary/40 hover:bg-background/60",
-                    notificationTone(item.type),
+                    notificationTone(item),
                     item.isRead ? "opacity-70" : "",
                   )}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <p className={item.isRead ? "text-xs font-semibold text-muted-foreground" : "text-xs font-semibold text-foreground"}>
-                      {notificationTitle(item.type, item.title, t)}
+                      {notificationTitle(item, item.title, t)}
                     </p>
                     <span className="shrink-0 text-[10px] text-muted-foreground">
                       {dateTimeLabel(item.createdAt, locale)}

@@ -1,14 +1,16 @@
 "use server";
 
-import { MembershipRole } from "@prisma/client";
+import { MembershipRole } from "@/lib/db-client";
 import { redirect } from "next/navigation";
 
 import { buildTrialLifecycle } from "@/features/billing/lib/account-lifecycle";
 import { prisma } from "@/lib/db";
 import { isDatabaseConnectivityError } from "@/lib/errors/prisma";
 import { ensureDemoAccount } from "@/features/auth/lib/demo";
+import { trackFunnelEventServer } from "@/features/analytics/lib/funnel-events-server";
 import { hashPassword, verifyPassword } from "@/features/auth/lib/password";
 import { clearAuthSession, setAuthSession } from "@/features/auth/lib/session";
+import { isDesktopMode } from "@/lib/runtime";
 
 function normalizeEmail(value: FormDataEntryValue | null) {
   return String(value ?? "")
@@ -103,6 +105,9 @@ export async function signInAction(formData: FormData) {
 }
 
 export async function signUpAction(formData: FormData) {
+  if (isDesktopMode()) {
+    redirect("/login");
+  }
   try {
     const fullName = normalizeValue(formData.get("fullName"));
     const email = normalizeEmail(formData.get("email"));
@@ -152,6 +157,28 @@ export async function signUpAction(formData: FormData) {
         fromStatus: null,
         toStatus: trialLifecycle.accountStatus,
         reason: "SIGNUP_TRIAL_STARTED",
+      },
+    });
+
+    await trackFunnelEventServer({
+      eventName: "signup_complete",
+      sourcePath: "/login",
+      sourceSection: "signup-form",
+      companyId: company.id,
+      userId: user.id,
+      metadata: {
+        role: MembershipRole.OWNER,
+      },
+    });
+
+    await trackFunnelEventServer({
+      eventName: "trial_start",
+      sourcePath: "/login",
+      sourceSection: "signup-form",
+      companyId: company.id,
+      userId: user.id,
+      metadata: {
+        trialEndsAt: trialLifecycle.trialEndsAt?.toISOString() || null,
       },
     });
 

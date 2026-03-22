@@ -16,6 +16,7 @@ Next.js admin app for DOC_v1.
 - `AUTH_SECRET`
 - `DOCUMENT_ENGINE_URL` (optional, default: `http://127.0.0.1:8000`)
 - `DOCUMENT_ENGINE_TOKEN` (optional bearer token for Python engine)
+- `DEMO_EMAIL`, `DEMO_PASSWORD`, `DEMO_FULL_NAME`, `DEMO_COMPANY_NAME` (optional demo workspace seed)
 
 ## Current scaffold
 

@@ -1,4 +1,5 @@
-import { DocumentStatus, NotificationChannel, NotificationStatus, NotificationType, Prisma } from "@prisma/client";
+import { DocumentStatus, NotificationChannel, NotificationStatus, NotificationType } from "@/lib/db-client";
+import type { Prisma } from "@/lib/db-client";
 
 import { prisma } from "@/lib/db";
 
@@ -10,6 +11,7 @@ import {
 } from "@/features/notifications/config";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const USAGE_ALERT_THRESHOLDS = [70, 90, 100] as const;
 
 const DUE_NOTIFICATION_ELIGIBLE_STATUSES: DocumentStatus[] = [
   DocumentStatus.ISSUED,
@@ -57,6 +59,64 @@ function overdueBody(input: { number: string; clientName: string; dueDate: Date;
 
 function draftStaleBody(input: { number: string; clientName: string; daysStale: number }) {
   return `${input.number} for ${input.clientName} has stayed in draft for ${input.daysStale} day(s).`;
+}
+
+function usageMetricLabel(metric: "documents_per_month" | "exports_per_month") {
+  return metric === "documents_per_month" ? "Documents" : "Exports";
+}
+
+function hasEventKey(value: string | null | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+async function createNotificationEventsIgnoringExisting(rows: Prisma.NotificationEventCreateManyInput[]) {
+  if (!rows.length) {
+    return 0;
+  }
+
+  const seenEventKeys = new Set<string>();
+  const dedupedRows: Prisma.NotificationEventCreateManyInput[] = [];
+
+  for (const row of rows) {
+    if (!hasEventKey(row.eventKey)) {
+      dedupedRows.push(row);
+      continue;
+    }
+    if (seenEventKeys.has(row.eventKey)) {
+      continue;
+    }
+    seenEventKeys.add(row.eventKey);
+    dedupedRows.push(row);
+  }
+
+  if (!seenEventKeys.size) {
+    const created = await prisma.notificationEvent.createMany({ data: dedupedRows });
+    return created.count;
+  }
+
+  const existing = await prisma.notificationEvent.findMany({
+    where: {
+      companyId: rows[0]!.companyId,
+      eventKey: {
+        in: Array.from(seenEventKeys),
+      },
+    },
+    select: {
+      eventKey: true,
+    },
+  });
+
+  const existingEventKeys = new Set(
+    existing.map((row) => row.eventKey).filter((value): value is string => hasEventKey(value)),
+  );
+  const toInsert = dedupedRows.filter((row) => !hasEventKey(row.eventKey) || !existingEventKeys.has(row.eventKey));
+
+  if (!toInsert.length) {
+    return 0;
+  }
+
+  const created = await prisma.notificationEvent.createMany({ data: toInsert });
+  return created.count;
 }
 
 export type NotificationFeedItem = {
@@ -285,12 +345,8 @@ export async function refreshDueDocumentNotifications(companyId: string) {
     return { created: 0 as const };
   }
 
-  const result = await prisma.notificationEvent.createMany({
-    data: rows,
-    skipDuplicates: true,
-  });
-
-  return { created: result.count as number };
+  const created = await createNotificationEventsIgnoringExisting(rows);
+  return { created: created as number };
 }
 
 export async function listNotificationsForUser(input: {
@@ -397,13 +453,27 @@ export async function markAllNotificationsRead(input: { companyId: string; userI
     return { ok: true as const, count: 0 };
   }
 
-  await prisma.notificationRead.createMany({
-    data: unread.map((event) => ({
-      notificationEventId: event.id,
-      userId: input.userId,
-    })),
-    skipDuplicates: true,
-  });
+  const now = new Date();
+  await prisma.$transaction(
+    unread.map((event) =>
+      prisma.notificationRead.upsert({
+        where: {
+          notificationEventId_userId: {
+            notificationEventId: event.id,
+            userId: input.userId,
+          },
+        },
+        create: {
+          notificationEventId: event.id,
+          userId: input.userId,
+          readAt: now,
+        },
+        update: {
+          readAt: now,
+        },
+      }),
+    ),
+  );
 
   return { ok: true as const, count: unread.length };
 }
@@ -502,4 +572,62 @@ export async function notifyExportFailure(input: {
       sentAt: new Date(),
     },
   }).catch(() => undefined);
+}
+
+export async function notifyUsageLimitThreshold(input: {
+  companyId: string;
+  documentId: string;
+  metric: "documents_per_month" | "exports_per_month";
+  used: number;
+  limit: number;
+  periodStart: Date;
+  periodEnd: Date;
+}) {
+  if (!input.documentId || !Number.isFinite(input.limit) || input.limit < 0) {
+    return;
+  }
+
+  const config = await getCompanyNotificationConfig(input.companyId);
+  if (!config.enabled || !config.inAppEnabled || !config.notifyUsageLimits) {
+    return;
+  }
+
+  const percent = input.limit <= 0 ? (input.used > 0 ? 100 : 0) : (input.used / input.limit) * 100;
+  const activeThresholds = USAGE_ALERT_THRESHOLDS.filter((threshold) => percent >= threshold);
+  if (!activeThresholds.length) {
+    return;
+  }
+
+  const now = new Date();
+  const metricLabel = usageMetricLabel(input.metric);
+  const periodTag = input.periodStart.toISOString().slice(0, 7);
+  const roundedPercent = Math.max(0, Math.min(999, Math.round(percent * 10) / 10));
+
+  const rows: Prisma.NotificationEventCreateManyInput[] = activeThresholds.map((threshold) => ({
+    companyId: input.companyId,
+    documentId: input.documentId,
+    notificationType: NotificationType.STATUS_CHANGED,
+    channel: NotificationChannel.IN_APP,
+    status: NotificationStatus.SENT,
+    eventKey: `usage:${input.metric}:${periodTag}:${threshold}`,
+    title: threshold >= 100 ? "Usage limit reached" : "Usage warning",
+    body:
+      threshold >= 100
+        ? `${metricLabel} monthly limit reached (${input.used}/${input.limit}).`
+        : `${metricLabel} monthly usage reached ${roundedPercent}% (${input.used}/${input.limit}).`,
+    actionPath: "/settings?tab=billing",
+    metadataJson: {
+      notificationKind: "USAGE_LIMIT",
+      metric: input.metric,
+      threshold,
+      used: input.used,
+      limit: input.limit,
+      percent: roundedPercent,
+      periodStart: input.periodStart.toISOString(),
+      periodEnd: input.periodEnd.toISOString(),
+    },
+    sentAt: now,
+  }));
+
+  await createNotificationEventsIgnoringExisting(rows).catch(() => undefined);
 }

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { PageEducationBanner } from "@/components/marketing/page-education-banner";
 import { requireAuthContext } from "@/features/auth/lib/session";
 import { ClientsView } from "@/features/clients/components/clients-view";
 import { getServerI18n } from "@/i18n/server";
@@ -100,6 +101,23 @@ export default async function ClientsPage() {
           {t("clients.page.subtitle")}
         </p>
       </header>
+      <PageEducationBanner
+        title={t("education.banner.clients.title")}
+        description={t("education.banner.clients.description")}
+        videoLabel={t("education.banner.common.watchVideo")}
+        videoHref="https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+        helpLabel={t("education.banner.common.needHelp")}
+        supportTitle={t("education.banner.support.title")}
+        supportDescription={t("education.banner.support.description")}
+        supportCallLabel={t("education.banner.support.call")}
+        supportCloseLabel={t("education.banner.support.close")}
+        sourceSection="education-clients"
+        checklist={[
+          t("education.banner.clients.point1"),
+          t("education.banner.clients.point2"),
+          t("education.banner.clients.point3"),
+        ]}
+      />
       <ClientsView clients={rows} currency={currency} />
     </div>
   );
